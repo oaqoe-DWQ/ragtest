@@ -125,12 +125,6 @@ def send_result_email(
             server.send_message(msg)
 
         logger.info(f"✅ 邮件发送成功！")
-
-        # 发送成功后延迟30秒
-        logger.info(f"邮件发送完成，延迟 30 秒...")
-        time.sleep(30)
-        logger.info(f"延迟结束")
-
         return True
 
     except smtplib.SMTPAuthenticationError:
@@ -402,12 +396,6 @@ RAG 评估结果报告
             server.send_message(msg)
 
         logger.info(f"✅ 评估结果邮件发送成功！")
-
-        # 发送成功后延迟30秒
-        logger.info(f"邮件发送完成，延迟 30 秒...")
-        time.sleep(30)
-        logger.info(f"延迟结束")
-
         return True
 
     except smtplib.SMTPAuthenticationError:

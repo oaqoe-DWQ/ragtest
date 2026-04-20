@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import asyncio
 import os
 import json
+import time
 import pandas as pd
 import re
 from typing import Dict, Any, List, Optional
@@ -651,9 +652,11 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
         except Exception as report_err:
             info_print(f"⚠️ 总体测试报告导出失败（不影响评估结果）: {report_err}")
 
-        # 发送邮件通知（评估完成后自动发送）
+        # 发送邮件通知（评估完成后延迟30秒再发送）
         try:
             from email_sender import send_evaluation_result_email
+            info_print("⏳ 评估完成，30秒后发送邮件通知...")
+            time.sleep(30)
             email_sent = send_evaluation_result_email(ragas_results, export_path, report_path)
             if email_sent:
                 info_print("📧 评估结果邮件已发送")
