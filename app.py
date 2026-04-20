@@ -654,14 +654,18 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
 
         # 发送邮件通知（评估完成后延迟30秒再发送）
         try:
-            from email_sender import send_evaluation_result_email
-            info_print("⏳ 评估完成，30秒后发送邮件通知...")
-            time.sleep(30)
-            email_sent = send_evaluation_result_email(ragas_results, export_path, report_path)
-            if email_sent:
-                info_print("📧 评估结果邮件已发送")
+            from email_sender import load_email_config
+            config = load_email_config()
+            if not config.get('email_enabled'):
+                info_print("ℹ️ 邮件发送未启用，跳过发送")
             else:
-                info_print("ℹ️ 邮件发送已跳过（功能未启用或配置不完整）")
+                info_print("⏳ 评估完成，30秒后发送邮件通知...")
+                time.sleep(30)
+                email_sent = send_evaluation_result_email(ragas_results, export_path, report_path)
+                if email_sent:
+                    info_print("📧 评估结果邮件已发送")
+                else:
+                    info_print("ℹ️ 邮件发送失败（请检查邮箱配置）")
         except Exception as email_err:
             info_print(f"⚠️ 邮件发送失败: {email_err}")
         

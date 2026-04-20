@@ -245,7 +245,16 @@ class StandardDatasetBuilder:
             
         except Exception as e:
             logger.error(f"生成标准答案失败: {e}")
-            return None
+            import traceback
+            logger.error(traceback.format_exc())
+            info_print(f"❌ 生成标准答案异常: {e}")
+            info_print(f"   异常详情: {traceback.format_exc()}")
+            # 返回部分结果而非 None，确保 ragas_scores 为空字典而非 KeyError
+            return {
+                "reference": "",
+                "reference_contexts": [],
+                "ragas_scores": {}
+            }
     
     def calculate_relevance_score(self, query: str, chunk: str) -> float:
         """
@@ -423,18 +432,82 @@ class StandardDatasetBuilder:
     
     async def evaluate_with_ragas_metrics(self, query: str, answer: str, contexts: List[str]) -> Dict[str, float]:
         """
-        简化的评估方法，不进行复杂的评估计算
-        
+        使用 Ragas 评估标准答案的上下文相关性等指标。
+
         Args:
             query: 用户查询
             answer: 生成的标准答案
             contexts: 相关上下文
-            
+
         Returns:
-            Dict[str, float]: 空的评估指标（不进行评估）
+            Dict[str, float]: 评估指标字典，如 {"context_relevance": 0.83}
         """
-        info_print(f"\n🔍 跳过复杂评估，直接返回空结果...")
-        return {}
+        try:
+            if not contexts:
+                info_print("⚠️ 没有上下文，跳过 Ragas 评估")
+                return {"context_relevance": None}
+
+            info_print(f"\n🔍 使用 Ragas 评估指标（context_relevance）...")
+            info_print(f"  query: {query[:60]}...")
+            info_print(f"  contexts 数量: {len(contexts)}")
+
+            # 构建 Ragas SingleTurnSample
+            sample = SingleTurnSample(
+                user_input=query,
+                reference=answer,
+                reference_contexts=contexts,
+                response=answer
+            )
+
+            # 仅评估 context_relevance（最快的指标，不依赖 embedding）
+            from custom_metrics import ChineseContextRelevance
+            metric = ChineseContextRelevance()
+
+            # 设置环境变量减少日志
+            import os
+            os.environ['RAGAS_QUIET'] = 'true'
+            os.environ['DISABLE_PROGRESS_BARS'] = 'true'
+
+            # 执行评估
+            from ragas.run_config import RunConfig
+            run_config = RunConfig(timeout=60)
+
+            result = evaluate(
+                [sample],
+                metrics=[metric],
+                llm=self.ragas_llm,
+                run_config=run_config
+            )
+
+            # 提取结果
+            scores = {}
+            result_df = result.to_pandas()
+            info_print(f"📊 Ragas 评估结果 DataFrame 列名: {list(result_df.columns)}")
+            info_print(f"📊 Ragas 评估结果 DataFrame:\n{result_df.to_string()}")
+
+            if not result_df.empty:
+                # ChineseContextRelevance 继承自 NVContextRelevance，列名为 nv_context_relevance
+                for col in ['nv_context_relevance', 'context_relevance']:
+                    if col in result_df.columns:
+                        val = result_df[col].iloc[0]
+                        info_print(f"✅ 找到列 '{col}'，原始值: {val}，类型: {type(val)}")
+                        if val is not None and not (hasattr(val, 'isna') and val.isna()):
+                            scores['context_relevance'] = float(val)
+                            info_print(f"✅ context_relevance = {scores['context_relevance']}")
+                            break
+                else:
+                    info_print(f"⚠️ 未找到 context_relevance 相关列")
+
+            if not scores:
+                info_print(f"⚠️ Ragas 评估未返回有效结果，scores 为空")
+                scores = {"context_relevance": None}
+
+            return scores
+
+        except Exception as e:
+            logger.error(f"Ragas 评估失败: {e}")
+            info_print(f"⚠️ Ragas 评估异常: {e}")
+            return {"context_relevance": None}
 
     def clean_reference_answer(self, answer: str) -> str:
         """
@@ -539,27 +612,29 @@ class StandardDatasetBuilder:
                 
                 # 生成标准答案
                 result = await self.generate_reference_answer(query, all_chunks)
-                
+
                 if result:
                     # 更新reference_contexts和reference
                     reference_contexts = result.get('reference_contexts', [])
-                    info_print(f"🔧 准备保存 reference_contexts:")
-                    info_print(f"  reference_contexts 类型: {type(reference_contexts)}")
-                    info_print(f"  reference_contexts 长度: {len(reference_contexts) if reference_contexts else 0}")
-                    
+                    ragas_scores = result.get('ragas_scores', {})
+                    context_relevance = ragas_scores.get('context_relevance')
+
+                    info_print(f"💾 保存到 DataFrame:")
+                    info_print(f"  reference_contexts 类型: {type(reference_contexts)}, 长度: {len(reference_contexts) if reference_contexts else 0}")
+                    info_print(f"  ragas_scores: {ragas_scores}")
+                    info_print(f"  context_relevance: {context_relevance}")
+
                     formatted_contexts = self.format_contexts(reference_contexts)
                     df.at[index, 'reference_contexts'] = str(formatted_contexts)
                     df.at[index, 'reference'] = str(result.get('reference', ''))
-                    
-                    info_print(f"💾 保存到 DataFrame:")
-                    info_print(f"  reference_contexts 列值长度: {len(str(formatted_contexts))}")
+                    df.at[index, 'context_relevance'] = context_relevance if context_relevance is not None else ''
+
                     info_print(f"  reference 列值长度: {len(str(result.get('reference', '')))}")
-                    
                     logger.info(f"✅ 成功生成标准答案: {index + 1}/{len(df)}")
                     info_print(f"✅ 第 {index + 1}/{len(df)} 条标准答案生成完成")
                 else:
-                    logger.warning(f"❌ 生成标准答案失败: {index + 1}")
-                    info_print(f"❌ 第 {index + 1}/{len(df)} 条标准答案生成失败")
+                    logger.warning(f"❌ 生成标准答案返回空结果: {index + 1}")
+                    info_print(f"❌ 第 {index + 1}/{len(df)} 条标准答案生成返回空")
                     
             except Exception as e:
                 logger.error(f"处理查询失败 {index + 1}: {e}")
@@ -724,9 +799,9 @@ class StandardDatasetBuilder:
                             info_print(f"\n📚 reference_contexts 分块内容:")
                             info_print(f"{'='*80}")
                             
-                            # 将reference_contexts按分块分割（假设用双换行符分隔）
+                            # 将reference_contexts按<<<__CONTEXT_BLOCK__>>>分隔符分割
                             if isinstance(reference_contexts, str):
-                                chunks = reference_contexts.split('\n\n')
+                                chunks = reference_contexts.split('<<<__CONTEXT_BLOCK__>>>')
                                 for i, chunk in enumerate(chunks):
                                     if chunk.strip():  # 只显示非空分块
                                         info_print(f"\n📄 分块 {i+1}:")

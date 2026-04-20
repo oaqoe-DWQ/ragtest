@@ -142,29 +142,29 @@ def export_ragas_detail_to_excel(
 def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     从Ragas结果中提取每个样本的详细分数
-    
+
     Args:
         ragas_results: 包含 raw_results 的字典
-        
+
     Returns:
         List[Dict[str, Any]]: 每个样本的分数列表
     """
     sample_data = []
     raw_results = ragas_results.get('raw_results')
-    
+
     # 获取原始样本数据（包含user_input、response、reference）
     original_samples = ragas_results.get('sample_data', [])
-    
+
     if raw_results is None and not original_samples:
         return sample_data
-    
+
     # 尝试从不同的数据结构中提取样本分数
     scores_df = None
-    
+
     # 方式1: 如果是 EvaluationResult 对象本身
     if hasattr(raw_results, '__dict__'):
         obj_dict = raw_results.__dict__
-        
+
         # 尝试获取 scores 属性
         if 'scores' in obj_dict:
             scores_data = obj_dict['scores']
@@ -174,13 +174,13 @@ def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]
                 scores_df = scores_data
             elif isinstance(scores_data, list):
                 scores_df = pd.DataFrame(scores_data)
-        
+
         # 尝试获取 dataset 属性
         if scores_df is None and 'dataset' in obj_dict:
             dataset = obj_dict['dataset']
             if hasattr(dataset, 'to_pandas'):
                 scores_df = dataset.to_pandas()
-    
+
     # 方式2: 如果 raw_results 本身就是字典
     if isinstance(raw_results, dict) and scores_df is None:
         if 'scores' in raw_results:
@@ -191,12 +191,49 @@ def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]
                 scores_df = scores_data
             elif isinstance(scores_data, list):
                 scores_df = pd.DataFrame(scores_data)
-    
+
+    # 方式3: 尝试 raw_results 是否有 to_pandas 方法
+    if scores_df is None and hasattr(raw_results, 'to_pandas'):
+        try:
+            scores_df = raw_results.to_pandas()
+        except Exception:
+            pass
+
     metrics = [
         'faithfulness', 'answer_relevancy', 'context_precision', 'context_recall',
         'context_entity_recall', 'context_relevance', 'answer_correctness', 'answer_similarity'
     ]
-    
+
+    # 指标名别名映射：导出名 -> DataFrame中可能的列名列表
+    # ChineseContextRelevance 的 name 为 "nv_context_relevance"，需要映射回来
+    metric_column_variants = {
+        'context_relevance': ['context_relevance', 'nv_context_relevance', 'Context Relevance'],
+    }
+
+    def _get_result_value(key: str) -> Any:
+        """从 ragas_results 中获取值，支持列名别名"""
+        if key in metric_column_variants:
+            for variant in metric_column_variants[key]:
+                val = ragas_results.get(variant)
+                if val is not None:
+                    return val
+            return None
+        return ragas_results.get(key)
+
+    def _get_df_value(row: Any, metric_name: str) -> Any:
+        """从 DataFrame 行中获取指标值，支持列名别名"""
+        if not hasattr(row, 'get') and not hasattr(row, '__getitem__'):
+            return None
+        variants = metric_column_variants.get(metric_name, [metric_name])
+        for col_name in variants:
+            if hasattr(row, 'get'):
+                value = row.get(col_name)
+            else:
+                value = None
+            if value is not None:
+                return value
+        return None
+
     # 如果找到了 scores DataFrame，提取每个样本的分数
     if scores_df is not None and hasattr(scores_df, 'iterrows'):
         for idx, row in scores_df.iterrows():
@@ -210,16 +247,16 @@ def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]
                 user_input = ""
                 response = ""
                 reference = ""
-            
+
             sample = {
                 "样本ID": idx + 1,
                 "user_input": user_input,
                 "response": response,
                 "reference": reference,
             }
-            
+
             for metric in metrics:
-                value = row.get(metric) if hasattr(row, 'get') else None
+                value = _get_df_value(row, metric)
                 if value is not None and not (isinstance(value, float) and pd.isna(value)):
                     try:
                         sample[metric] = float(value)
@@ -227,14 +264,14 @@ def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]
                         sample[metric] = ""
                 else:
                     sample[metric] = ""
-            
+
             sample["备注"] = ""
             sample_data.append(sample)
-    
+
     # 如果没有从raw_results提取到分数，但有原始样本数据，按样本展开
     if not sample_data and original_samples:
-        overall_scores = {m: _safe_float(ragas_results.get(m)) for m in metrics}
-        
+        overall_scores = {m: _safe_float(_get_result_value(m)) for m in metrics}
+
         for idx, orig in enumerate(original_samples):
             sample = {
                 "样本ID": idx + 1,
@@ -246,27 +283,27 @@ def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]
                 sample[metric] = overall_scores.get(metric, "")
             sample["备注"] = "整体评估结果"
             sample_data.append(sample)
-    
+
     # 如果既没有分数也没有样本数据，创建占位行
     if not sample_data:
-        has_any_metric = any(ragas_results.get(m) is not None for m in metrics)
+        has_any_metric = any(_get_result_value(m) is not None for m in metrics)
         if has_any_metric:
             sample_data.append({
                 "样本ID": 1,
                 "user_input": "",
                 "response": "",
                 "reference": "",
-                "faithfulness": _safe_float(ragas_results.get('faithfulness')),
-                "answer_relevancy": _safe_float(ragas_results.get('answer_relevancy')),
-                "context_precision": _safe_float(ragas_results.get('context_precision')),
-                "context_recall": _safe_float(ragas_results.get('context_recall')),
-                "context_entity_recall": _safe_float(ragas_results.get('context_entity_recall')),
-                "context_relevance": _safe_float(ragas_results.get('context_relevance')),
-                "answer_correctness": _safe_float(ragas_results.get('answer_correctness')),
-                "answer_similarity": _safe_float(ragas_results.get('answer_similarity')),
+                "faithfulness": _safe_float(_get_result_value('faithfulness')),
+                "answer_relevancy": _safe_float(_get_result_value('answer_relevancy')),
+                "context_precision": _safe_float(_get_result_value('context_precision')),
+                "context_recall": _safe_float(_get_result_value('context_recall')),
+                "context_entity_recall": _safe_float(_get_result_value('context_entity_recall')),
+                "context_relevance": _safe_float(_get_result_value('context_relevance')),
+                "answer_correctness": _safe_float(_get_result_value('answer_correctness')),
+                "answer_similarity": _safe_float(_get_result_value('answer_similarity')),
                 "备注": "整体评估结果，无样本级详情"
             })
-    
+
     return sample_data
 
 
@@ -397,12 +434,25 @@ def export_overall_testreport(
         ("Answer Similarity", "回答相似度", "answer_similarity"),
     ]
     
+    # 指标名别名映射：导出名 -> ragas_results中可能的键名
+    # ChineseContextRelevance 的 name 为 "nv_context_relevance"，需要映射回来
+    overall_metric_variants = {
+        'context_relevance': ['context_relevance', 'nv_context_relevance'],
+    }
+
     # 提取指标值
     report_data = []
     valid_metrics = []
-    
+
     for eng_name, cn_name, metric_key in metrics_info:
-        value = ragas_results.get(metric_key)
+        # 支持别名查找
+        keys_to_try = overall_metric_variants.get(metric_key, [metric_key])
+        value = None
+        for k in keys_to_try:
+            v = ragas_results.get(k)
+            if v is not None:
+                value = v
+                break
         if value is not None:
             try:
                 score = float(value)
