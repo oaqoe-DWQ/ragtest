@@ -2,7 +2,10 @@
   "enabled_metrics": [
     "context_recall",
     "context_precision",
-    "context_relevance"
+    "context_entity_recall",
+    "context_relevance",
+    "faithfulness",
+    "answer_relevancy"
   ],
   "version": "1.0"
 }

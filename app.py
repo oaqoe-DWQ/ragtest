@@ -37,6 +37,7 @@ from MAP_Metrics import MAPEvaluator
 from NDCG_Metrics import NDCGEvaluator
 from F1_Metrics import F1ScoreCalculator
 from ragas_detail_exporter import export_ragas_detail_to_excel, list_export_files, get_latest_export_file, export_overall_testreport, get_overall_report_files
+from email_sender import send_evaluation_result_email
 
 def calculate_text_similarity(text1: str, text2: str) -> float:
     """
@@ -635,18 +636,31 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
         info_print(f"✅ Ragas评估结果已保存到全局变量，fallback_mode: {ragas_results.get('fallback_mode', False)}")
         
         # 自动导出详情到shuju文件夹
+        export_path = None
         try:
             export_path = export_ragas_detail_to_excel(ragas_results)
             info_print(f"📄 详情已自动导出到: {export_path}")
         except Exception as export_err:
             info_print(f"⚠️ 自动导出失败（不影响评估结果）: {export_err}")
-        
+
         # 自动导出总体测试报告到Overall_testreport文件夹
+        report_path = None
         try:
             report_path = export_overall_testreport(ragas_results)
             info_print(f"📊 总体测试报告已自动导出到: {report_path}")
         except Exception as report_err:
             info_print(f"⚠️ 总体测试报告导出失败（不影响评估结果）: {report_err}")
+
+        # 发送邮件通知（评估完成后自动发送）
+        try:
+            from email_sender import send_evaluation_result_email
+            email_sent = send_evaluation_result_email(ragas_results, export_path, report_path)
+            if email_sent:
+                info_print("📧 评估结果邮件已发送")
+            else:
+                info_print("ℹ️ 邮件发送已跳过（功能未启用或配置不完整）")
+        except Exception as email_err:
+            info_print(f"⚠️ 邮件发送失败: {email_err}")
         
         return EvaluationResponse(
             success=True,

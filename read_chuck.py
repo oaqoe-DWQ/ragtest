@@ -45,7 +45,7 @@ class EvaluationConfig:
     max_chunk_length: int = 2000000
     
     # 性能优化参数
-    max_workers: int = 5  # 最大并发工作线程数，提升评估速度
+    max_workers: int = 3  # 最大并发工作线程数，提升评估速度
     batch_size: int = 6  # 批处理大小，减少 API 调用次数
     
     # 文件配置
