@@ -69,9 +69,15 @@ from ragas.metrics import (
 from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper
 
+# 自定义中文指标
+from custom_metrics import ChineseContextRelevance, ChineseContextRecall
+
 # LangChain imports
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.llms import Ollama
+
+# Dify LLM支持
+from dify_llm import DifyLLM, create_dify_llm
 
 # Other imports
 from dotenv import load_dotenv
@@ -482,7 +488,47 @@ class RagasEvaluator:
         verbose_info_print("🔧 设置环境...")
         
         # 根据配置选择LLM和Embedding模型
-        if hasattr(self.config, 'use_ollama') and self.config.use_ollama:
+        if hasattr(self.config, 'use_dify') and self.config.use_dify:
+            # 使用Dify API
+            verbose_info_print(f"🔧 使用Dify API配置")
+            
+            # 创建Dify LLM实例
+            self.llm = create_dify_llm(
+                api_key=self.config.dify_api_key,
+                api_url=self.config.dify_url,
+                app_id=self.config.dify_app_id,
+                streaming=self.config.dify_streaming,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                top_p=self.config.top_p
+            )
+            
+            # Embedding处理：尝试使用Qwen Embedding或Ollama
+            if hasattr(self.config, 'use_ollama') and self.config.use_ollama:
+                verbose_info_print(f"🔧 使用本地Ollama embedding模型: {self.config.ollama_embedding_model}")
+                self.embeddings = OllamaEmbeddings(
+                    ollama_url=self.config.ollama_url,
+                    model_name=self.config.ollama_embedding_model
+                )
+                custom_embeddings = self.embeddings
+            else:
+                # 使用Qwen Embedding
+                verbose_info_print(f"🔧 使用云端Qwen embedding模型: {self.config.embedding_model}")
+                self.embeddings = OpenAIEmbeddings(
+                    openai_api_key=self.config.api_key,
+                    openai_api_base=self.config.api_base,
+                    model=self.config.embedding_model
+                )
+                custom_embeddings = CustomQwenEmbeddings(
+                    self.config.api_key, 
+                    self.config.api_base, 
+                    self.config.embedding_model
+                )
+            
+            verbose_info_print(f"🤖 使用Dify LLM: {self.config.dify_url}")
+            verbose_info_print(f"📊 配置: temperature={self.config.temperature}, max_tokens={self.config.max_tokens}")
+            
+        elif hasattr(self.config, 'use_ollama') and self.config.use_ollama:
             # 使用本地模型：本地embedding + 云端LLM（混合模式）
             verbose_info_print(f"🔧 使用本地模型配置（混合模式）")
             
@@ -541,7 +587,7 @@ class RagasEvaluator:
         
         # 创建Ragas包装器
         # 确认采样参数已正确设置（提高 Ragas 解析器成功率）
-        verbose_info_print(f"🎯 LLM 采样参数: temperature={self.llm.temperature}, top_p={getattr(self.llm, 'top_p', 'N/A')}, max_tokens={getattr(self.llm, 'max_tokens', 'N/A')}")
+        verbose_info_print(f"🎯 LLM 采样参数: temperature={self.config.temperature}, max_tokens={self.config.max_tokens}")
         
         self.ragas_llm = LangchainLLMWrapper(self.llm)
         self.ragas_embeddings = LangchainEmbeddingsWrapper(custom_embeddings)
@@ -638,9 +684,9 @@ class RagasEvaluator:
             'faithfulness': lambda: Faithfulness(),
             'answer_relevancy': lambda: AnswerRelevancy(embeddings=self.ragas_embeddings),
             'context_precision': lambda: ContextPrecision(),
-            'context_recall': lambda: ContextRecall(),
+            'context_recall': lambda: ChineseContextRecall(),
             'context_entity_recall': lambda: StableContextEntityRecall(),
-            'context_relevance': lambda: ContextRelevance(),
+            'context_relevance': lambda: ChineseContextRelevance(),
             'answer_correctness': lambda: AnswerCorrectness(embeddings=self.ragas_embeddings),
             'answer_similarity': lambda: AnswerSimilarity(embeddings=self.ragas_embeddings)
         }
@@ -776,17 +822,28 @@ class ResultAnalyzer:
     def __init__(self):
         self.results = None
     
-    def analyze_results(self, results: Any) -> Dict[str, Any]:
+    def analyze_results(self, results: Any, df=None) -> Dict[str, Any]:
         """
         分析评估结果
         
         Args:
             results: Ragas评估结果
+            df: 原始DataFrame数据（包含user_input、response、reference等）
             
         Returns:
             Dict[str, Any]: 分析后的结果字典
         """
         info_print("📊 分析评估结果...")
+        
+        # 保存原始样本数据
+        sample_data = []
+        if df is not None:
+            for idx, row in df.iterrows():
+                sample_data.append({
+                    "user_input": str(row.get("user_input", "")),
+                    "response": str(row.get("response", "")),
+                    "reference": str(row.get("reference", "")) if "reference" in df.columns else str(row.get("final_reference", "")),
+                })
         
         # 检查是否是fallback结果
         if isinstance(results, dict) and results.get('fallback_mode', False):
@@ -802,7 +859,8 @@ class ResultAnalyzer:
                 'answer_similarity': results.get('answer_similarity', 0.5),
                 'raw_results': results,
                 'fallback_mode': True,
-                'error_message': results.get('error_message', '评估失败')
+                'error_message': results.get('error_message', '评估失败'),
+                'sample_data': sample_data,  # 原始样本数据
             }
             info_print("✅ Fallback结果分析完成")
             return analysis
@@ -822,11 +880,12 @@ class ResultAnalyzer:
             'context_precision': results_dict.get('context_precision') if isinstance(results_dict, dict) else None,
             'context_recall': results_dict.get('context_recall') if isinstance(results_dict, dict) else None,
             'context_entity_recall': results_dict.get('context_entity_recall') if isinstance(results_dict, dict) else None,
-            'context_relevance': results_dict.get('nv_context_relevance') if isinstance(results_dict, dict) else None,  # 使用正确的字段名
+            'context_relevance': results_dict.get('nv_context_relevance') if isinstance(results_dict, dict) else None,
             'answer_correctness': results_dict.get('answer_correctness') if isinstance(results_dict, dict) else None,
             'answer_similarity': results_dict.get('answer_similarity') if isinstance(results_dict, dict) else None,
             'raw_results': results,
-            'fallback_mode': False
+            'fallback_mode': False,
+            'sample_data': sample_data,  # 原始样本数据
         }
         
         info_print("✅ 结果分析完成")
@@ -966,8 +1025,8 @@ class MainController:
             # 7. 运行评估
             results = await self.ragas_evaluator.evaluate(dataset)
             
-            # 8. 分析结果
-            analysis = self.result_analyzer.analyze_results(results)
+            # 8. 分析结果（传入df以获取原始样本数据）
+            analysis = self.result_analyzer.analyze_results(results, df)
             
             # 9. 显示结果
             self.result_analyzer.display_results(analysis)

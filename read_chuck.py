@@ -31,15 +31,22 @@ class EvaluationConfig:
     ollama_embedding_model: str = "embeddinggemma:300m"
     ollama_llm_model: str = "llama3.2:3b"
     
+    # Dify配置
+    use_dify: bool = False
+    dify_url: str = ""
+    dify_api_key: str = ""
+    dify_app_id: Optional[str] = None
+    dify_streaming: bool = False
+    
     # 评估配置（LLM 输出稳定性参数）
     temperature: float = 0.0  # 使用 0.0 以获得更稳定的输出，提高 Ragas 解析器成功率
     top_p: float = 0.1  # 降低采样多样性，只从最高概率的 10% token 中选择
-    max_tokens: int = 2000  # 最大生成 token 数
-    max_chunk_length: int = 200
+    max_tokens: int = 2000000  # 最大生成 token 数
+    max_chunk_length: int = 2000000
     
     # 性能优化参数
-    max_workers: int = 16  # 最大并发工作线程数，提升评估速度
-    batch_size: int = 10  # 批处理大小，减少 API 调用次数
+    max_workers: int = 5  # 最大并发工作线程数，提升评估速度
+    batch_size: int = 6  # 批处理大小，减少 API 调用次数
     
     # 文件配置
     excel_file_path: str = None
@@ -56,6 +63,13 @@ class EvaluationConfig:
             ]
         if self.excel_file_path is None:
             self.excel_file_path = os.getenv("EXCEL_FILE_PATH", "standardDataset/standardDataset.xlsx")
+        
+        # 如果启用Dify，从环境变量加载Dify配置
+        if self.use_dify:
+            self.dify_url = self.dify_url or os.getenv("DIFY_URL", "")
+            self.dify_api_key = self.dify_api_key or os.getenv("DIFY_API_KEY", "")
+            self.dify_app_id = self.dify_app_id or os.getenv("DIFY_APP_ID")
+            self.dify_streaming = self.dify_streaming or os.getenv("DIFY_STREAMING", "false").lower() == "true"
 
 class DataLoader:
     """数据加载和解析模块"""
@@ -120,7 +134,7 @@ class TextProcessor:
     
     def split_text_into_chunks(self, text: str, max_chunk_length: Optional[int] = None) -> List[str]:
         """
-        将文本分割成小块段落，按空行分割
+        将文本分割成小块段落，按<<<__CONTEXT_BLOCK__>>>分隔符分割
         
         Args:
             text: 要分割的文本
@@ -132,16 +146,16 @@ class TextProcessor:
         if not text or not text.strip():
             return [text] if text else []
         
-        # 按空行分割（双换行符或更多换行符）
-        # 使用正则表达式匹配一个或多个连续的换行符
-        chunks = re.split(r'\n\s*\n', text.strip())
+        # 按<<<__CONTEXT_BLOCK__>>>分隔符分割
+        delimiter = "<<<__CONTEXT_BLOCK__>>>"
+        chunks = [chunk.strip() for chunk in text.split(delimiter)]
         
         # 过滤掉空块
-        chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+        chunks = [chunk for chunk in chunks if chunk]
         
-        # 如果没有找到空行分割，返回整个文本作为一个块
-        if not chunks:
-            chunks = [text.strip()]
+        # 如果没有找到分隔符，返回整个文本作为一个块
+        if len(chunks) <= 1 and delimiter not in text:
+            chunks = [text.strip()] if text.strip() else []
         
         return chunks
     

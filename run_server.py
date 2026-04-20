@@ -41,22 +41,26 @@ def main():
         info_print(f"⚠️  警告: 数据文件不存在: {excel_file}")
         info_print("请确保数据文件存在，或设置正确的EXCEL_FILE_PATH环境变量")
     
+    # 获取服务器配置
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    
     info_print("🚀 启动RAG评估系统...")
     info_print("=" * 50)
     info_print(f"📊 数据文件: {excel_file}")
     info_print(f"🤖 模型: {os.getenv('QWEN_MODEL_NAME', 'qwen-plus')}")
     info_print(f"🔧 Embedding模型: {os.getenv('QWEN_EMBEDDING_MODEL', 'text-embedding-v1')}")
     info_print("=" * 50)
-    info_print("🌐 访问地址: http://localhost:8000")
-    info_print("📚 API文档: http://localhost:8000/docs")
+    info_print(f"🌐 访问地址: http://localhost:{port}")
+    info_print(f"📚 API文档: http://localhost:{port}/docs")
     info_print("=" * 50)
     
     try:
         # 启动服务器
         uvicorn.run(
             "app:app",
-            host="0.0.0.0",
-            port=8000,
+            host=host,
+            port=port,
             reload=True,
             log_level="info"
         )

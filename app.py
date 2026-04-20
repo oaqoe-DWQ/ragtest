@@ -36,6 +36,7 @@ from MRR_Metrics import MRREvaluator
 from MAP_Metrics import MAPEvaluator
 from NDCG_Metrics import NDCGEvaluator
 from F1_Metrics import F1ScoreCalculator
+from ragas_detail_exporter import export_ragas_detail_to_excel, list_export_files, get_latest_export_file, export_overall_testreport, get_overall_report_files
 
 def calculate_text_similarity(text1: str, text2: str) -> float:
     """
@@ -529,25 +530,63 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
         dataset_file = "standardDataset.xlsx" if request is None else request.dataset_file
         excel_file_path = f"standardDataset/{dataset_file}"
         
+        # 检查是否使用Dify
+        use_dify = os.getenv("USE_DIFY", "false").lower() == "true"
+        use_ollama = os.getenv("USE_OLLAMA", "false").lower() == "true"
+        
         # 创建配置
-        config = EvaluationConfig(
-            api_key=os.getenv("QWEN_API_KEY"),
-            api_base=os.getenv("QWEN_API_BASE"),
-            model_name=os.getenv("QWEN_MODEL_NAME", "qwen-plus"),
-            embedding_model=os.getenv("QWEN_EMBEDDING_MODEL", "text-embedding-v1"),
-            use_ollama=os.getenv("USE_OLLAMA", "false").lower() == "true",
-            ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
-            ollama_embedding_model=os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:300m"),
-            ollama_llm_model=os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:7b"),
-            excel_file_path=excel_file_path
-        )
+        if use_dify:
+            # 使用Dify配置
+            config = EvaluationConfig(
+                api_key=os.getenv("QWEN_API_KEY") or "",
+                api_base=os.getenv("QWEN_API_BASE") or "",
+                model_name=os.getenv("QWEN_MODEL_NAME", "qwen-plus"),
+                embedding_model=os.getenv("QWEN_EMBEDDING_MODEL", "text-embedding-v1"),
+                use_dify=True,
+                dify_url=os.getenv("DIFY_URL", ""),
+                dify_api_key=os.getenv("DIFY_API_KEY", ""),
+                dify_app_id=os.getenv("DIFY_APP_ID"),
+                dify_streaming=os.getenv("DIFY_STREAMING", "false").lower() == "true",
+                use_ollama=use_ollama,
+                ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                ollama_embedding_model=os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:300m"),
+                ollama_llm_model=os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:7b"),
+                excel_file_path=excel_file_path
+            )
+            info_print("🤖 评估配置: 使用Dify API")
+        elif use_ollama:
+            # 使用Ollama配置
+            config = EvaluationConfig(
+                api_key=os.getenv("QWEN_API_KEY"),
+                api_base=os.getenv("QWEN_API_BASE"),
+                model_name=os.getenv("QWEN_MODEL_NAME", "qwen-plus"),
+                embedding_model=os.getenv("QWEN_EMBEDDING_MODEL", "text-embedding-v1"),
+                use_ollama=True,
+                ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+                ollama_embedding_model=os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:300m"),
+                ollama_llm_model=os.getenv("OLLAMA_LLM_MODEL", "qwen2.5:7b"),
+                excel_file_path=excel_file_path
+            )
+            info_print("🤖 评估配置: 使用Ollama (本地LLM + 本地Embedding)")
+        else:
+            # 使用Qwen配置
+            config = EvaluationConfig(
+                api_key=os.getenv("QWEN_API_KEY"),
+                api_base=os.getenv("QWEN_API_BASE"),
+                model_name=os.getenv("QWEN_MODEL_NAME", "qwen-plus"),
+                embedding_model=os.getenv("QWEN_EMBEDDING_MODEL", "text-embedding-v1"),
+                use_ollama=False,
+                excel_file_path=excel_file_path
+            )
+            info_print("🤖 评估配置: 使用Qwen API")
         
         # 验证配置
         if not config.api_key or not config.api_base:
-            return EvaluationResponse(
-                success=False,
-                message="请设置QWEN_API_KEY和QWEN_API_BASE环境变量"
-            )
+            if not use_dify:
+                return EvaluationResponse(
+                    success=False,
+                    message="请设置QWEN_API_KEY和QWEN_API_BASE环境变量，或启用Dify配置"
+                )
         
         # 创建主控制器并运行评估
         controller = MainController(config)
@@ -589,10 +628,25 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
             "error_message": results.get("error_message", ""),
             "evaluation_completed": True,  # 标记评估已完成
             "evaluation_time": results.get("evaluation_time", None),
-            "dataset_file": dataset_file  # 保存使用的数据集文件
+            "dataset_file": dataset_file,  # 保存使用的数据集文件
+            "sample_data": results.get("sample_data", []),  # 原始样本数据
         }
         
         info_print(f"✅ Ragas评估结果已保存到全局变量，fallback_mode: {ragas_results.get('fallback_mode', False)}")
+        
+        # 自动导出详情到shuju文件夹
+        try:
+            export_path = export_ragas_detail_to_excel(ragas_results)
+            info_print(f"📄 详情已自动导出到: {export_path}")
+        except Exception as export_err:
+            info_print(f"⚠️ 自动导出失败（不影响评估结果）: {export_err}")
+        
+        # 自动导出总体测试报告到Overall_testreport文件夹
+        try:
+            report_path = export_overall_testreport(ragas_results)
+            info_print(f"📊 总体测试报告已自动导出到: {report_path}")
+        except Exception as report_err:
+            info_print(f"⚠️ 总体测试报告导出失败（不影响评估结果）: {report_err}")
         
         return EvaluationResponse(
             success=True,
@@ -607,6 +661,109 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
         return EvaluationResponse(
             success=False,
             message=error_msg
+        )
+
+@app.post("/api/ragas/export-detail", response_model=EvaluationResponse)
+async def export_ragas_detail(request: Optional[EvaluationRequest] = None):
+    """导出Ragas评估详情到Excel文件"""
+    global ragas_results
+    
+    try:
+        if not ragas_results:
+            return EvaluationResponse(
+                success=False,
+                message="没有Ragas评估结果可导出，请先运行评估"
+            )
+        
+        # 导出到Excel
+        output_path = export_ragas_detail_to_excel(ragas_results)
+        
+        info_print(f"✅ Ragas详情已导出到: {output_path}")
+        
+        return EvaluationResponse(
+            success=True,
+            message="导出成功",
+            data={
+                "file_path": output_path,
+                "filename": os.path.basename(output_path)
+            }
+        )
+        
+    except Exception as e:
+        error_msg = f"导出Ragas详情失败: {str(e)}"
+        info_print(error_msg)
+        traceback.print_exc()
+        return EvaluationResponse(
+            success=False,
+            message=error_msg
+        )
+
+@app.get("/api/overall-report/download/{filename}")
+async def download_overall_report(filename: str):
+    """下载指定的总体测试报告文件"""
+    try:
+        # 安全验证文件名
+        if '..' in filename or '/' in filename or '\\' in filename:
+            raise HTTPException(status_code=400, detail="无效的文件名")
+        
+        report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Overall_testreport", filename)
+        
+        if not os.path.exists(report_path):
+            raise HTTPException(status_code=404, detail="文件不存在")
+        
+        info_print(f"📥 下载总体测试报告: {filename}")
+        
+        return FileResponse(
+            path=report_path,
+            filename=filename,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = f"下载总体测试报告失败: {str(e)}"
+        info_print(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
+
+@app.get("/api/ragas/export-latest", response_model=EvaluationResponse)
+async def get_latest_export():
+    """获取最新导出的Ragas详情文件"""
+    try:
+        latest = get_latest_export_file()
+        if latest:
+            return EvaluationResponse(
+                success=True,
+                message="获取最新文件成功",
+                data={"file_path": latest, "filename": os.path.basename(latest)}
+            )
+        else:
+            return EvaluationResponse(
+                success=False,
+                message="没有找到任何导出文件"
+            )
+    except Exception as e:
+        return EvaluationResponse(
+            success=False,
+            message=f"获取最新文件失败: {str(e)}"
+        )
+
+@app.get("/api/overall-report/list", response_model=EvaluationResponse)
+async def list_overall_reports():
+    """获取所有总体测试报告文件列表"""
+    try:
+        files = get_overall_report_files()
+        return EvaluationResponse(
+            success=True,
+            message="获取总体测试报告列表成功",
+            data={"files": files}
+        )
+    except Exception as e:
+        return EvaluationResponse(
+            success=False,
+            message=f"获取总体测试报告列表失败: {str(e)}"
         )
 
 @app.get("/api/bm25/details", response_model=EvaluationResponse)
@@ -1151,6 +1308,10 @@ async def save_evaluation(request: SaveEvaluationRequest):
             evaluation_id = db.save_ragas_result(results, request.description)
         
         if evaluation_id:
+            # 清除历史数据缓存，确保下次获取时能看到新数据
+            from api_cache import clear_all_caches
+            clear_all_caches()
+            
             return SaveEvaluationResponse(
                 success=True,
                 message=f"{request.evaluation_type}评估结果保存成功",
@@ -1513,6 +1674,14 @@ class EmbeddingConfigRequest(BaseModel):
     ollama_llm_model: str = "qwen2.5:7b"
     qwen_api_key: str = ""
 
+class DifyConfigRequest(BaseModel):
+    """Dify配置请求模型"""
+    use_dify: bool
+    dify_url: str = ""
+    dify_api_key: str = ""
+    dify_app_id: Optional[str] = None
+    dify_streaming: bool = False
+
 @app.post("/api/embedding-config")
 async def update_embedding_config(request: EmbeddingConfigRequest):
     """更新embedding模型配置"""
@@ -1550,6 +1719,98 @@ async def update_embedding_config(request: EmbeddingConfigRequest):
         return EvaluationResponse(
             success=False,
             message=f"更新embedding配置失败: {str(e)}"
+        )
+
+@app.get("/api/dify-config")
+async def get_dify_config():
+    """获取当前Dify配置"""
+    try:
+        config = {
+            "use_dify": get_env_value("USE_DIFY", os.getenv("USE_DIFY", "false")).lower() == "true",
+            "dify_url": get_env_value("DIFY_URL", os.getenv("DIFY_URL", "")),
+            "dify_api_key": get_env_value("DIFY_API_KEY", os.getenv("DIFY_API_KEY", "")),
+            "dify_app_id": get_env_value("DIFY_APP_ID", os.getenv("DIFY_APP_ID", "")),
+            "dify_streaming": get_env_value("DIFY_STREAMING", os.getenv("DIFY_STREAMING", "false")).lower() == "true"
+        }
+        
+        return EvaluationResponse(
+            success=True,
+            message="获取Dify配置成功",
+            data=config
+        )
+    except Exception as e:
+        return EvaluationResponse(
+            success=False,
+            message=f"获取Dify配置失败: {str(e)}"
+        )
+
+@app.post("/api/dify-config")
+async def update_dify_config(request: DifyConfigRequest):
+    """更新Dify配置"""
+    try:
+        # 更新环境变量（仅在当前会话中有效）
+        os.environ["USE_DIFY"] = str(request.use_dify).lower()
+        os.environ["DIFY_URL"] = request.dify_url
+        os.environ["DIFY_API_KEY"] = request.dify_api_key
+        os.environ["DIFY_STREAMING"] = str(request.dify_streaming).lower()
+        
+        if request.dify_app_id:
+            os.environ["DIFY_APP_ID"] = request.dify_app_id
+        
+        # 同时更新.env文件
+        env_updates = {
+            "USE_DIFY": str(request.use_dify).lower(),
+            "DIFY_URL": request.dify_url,
+            "DIFY_API_KEY": request.dify_api_key,
+            "DIFY_STREAMING": str(request.dify_streaming).lower()
+        }
+        
+        if request.dify_app_id:
+            env_updates["DIFY_APP_ID"] = request.dify_app_id
+        
+        update_env_file(env_updates)
+        
+        return EvaluationResponse(
+            success=True,
+            message="Dify配置更新成功"
+        )
+    except Exception as e:
+        return EvaluationResponse(
+            success=False,
+            message=f"更新Dify配置失败: {str(e)}"
+        )
+
+@app.get("/api/llm-provider")
+async def get_llm_provider():
+    """获取当前使用的LLM提供商"""
+    try:
+        use_dify = os.getenv("USE_DIFY", "false").lower() == "true"
+        use_ollama = os.getenv("USE_OLLAMA", "false").lower() == "true"
+        
+        if use_dify:
+            provider = "dify"
+            provider_name = "Dify API"
+        elif use_ollama:
+            provider = "ollama"
+            provider_name = "Ollama (本地)"
+        else:
+            provider = "qwen"
+            provider_name = "Qwen API"
+        
+        return EvaluationResponse(
+            success=True,
+            message="获取LLM提供商成功",
+            data={
+                "provider": provider,
+                "provider_name": provider_name,
+                "use_dify": use_dify,
+                "use_ollama": use_ollama
+            }
+        )
+    except Exception as e:
+        return EvaluationResponse(
+            success=False,
+            message=f"获取LLM提供商失败: {str(e)}"
         )
 
 @app.get("/api/dataset-files")

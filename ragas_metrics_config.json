@@ -2,7 +2,6 @@
   "enabled_metrics": [
     "context_recall",
     "context_precision",
-    "context_entity_recall",
     "context_relevance"
   ],
   "version": "1.0"

@@ -51,3 +51,10 @@ coverage/
 *.swp
 *.swo
 
+# Test data and reports
+shuju/
+Overall_testreport/
+
+# Temporary Excel files
+~$*.xlsx
+

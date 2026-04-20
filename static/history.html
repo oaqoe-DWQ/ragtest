@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>历史数据分析 - RAG评估系统</title>
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="/static/utils/debounce.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <link rel="stylesheet" href="/static/components/navigation.css">
     <style>
@@ -1254,12 +1255,18 @@
             };
             
             // 创建图表（使用react而不是newPlot可以更快地更新）
-            if (document.getElementById(container).data) {
+            const containerElement = document.getElementById(containerId);
+            if (!containerElement) {
+                console.error(`❌ 图表容器 ${containerId} 不存在`);
+                return;
+            }
+            
+            if (containerElement.data) {
                 // 如果图表已存在，使用react更新（更快）
-                Plotly.react(container, plotData, layout, config);
+                Plotly.react(containerId, plotData, layout, config);
             } else {
                 // 首次创建图表
-                Plotly.newPlot(container, plotData, layout, config);
+                Plotly.newPlot(containerId, plotData, layout, config);
             }
         }
 
@@ -1684,7 +1691,6 @@
             return `${month}-${day} ${hours}:${minutes}`;
         }
     </script>
-    <script src="/static/utils/debounce.js"></script>
     <script src="/static/components/navigation.js"></script>
 </body>
 </html>
