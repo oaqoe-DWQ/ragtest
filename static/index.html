@@ -488,19 +488,23 @@
                         <h4><i class="fas fa-database"></i> 上下文质量指标</h4>
                         <div class="metric-checkbox-item">
                             <label>
-                                <input type="checkbox" id="metric-context_recall" value="context_recall" checked disabled>
+                                <input type="checkbox" id="metric-context_recall" value="context_recall" checked>
                                 <span class="metric-name">Context Recall</span>
                                 <span class="metric-cn-name">上下文召回率</span>
+                                <!-- === 改动：移除必选标记 ===
                                 <span class="required-badge">必选</span>
+                                -->
                             </label>
                             <p class="metric-desc">评估检索到的上下文是否包含回答问题所需的所有信息</p>
                         </div>
                         <div class="metric-checkbox-item">
                             <label>
-                                <input type="checkbox" id="metric-context_precision" value="context_precision" checked disabled>
+                                <input type="checkbox" id="metric-context_precision" value="context_precision" checked>
                                 <span class="metric-name">Context Precision</span>
                                 <span class="metric-cn-name">上下文精确度</span>
+                                <!-- === 改动：移除必选标记 ===
                                 <span class="required-badge">必选</span>
+                                -->
                             </label>
                             <p class="metric-desc">评估检索到的上下文中有多少是与查询直接相关的</p>
                         </div>

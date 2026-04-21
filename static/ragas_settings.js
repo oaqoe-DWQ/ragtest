@@ -9,8 +9,8 @@
 
 // 全部可选的Ragas指标
 const ALL_RAGAS_METRICS = [
-    'context_recall',        // 必选
-    'context_precision',     // 必选
+    'context_recall',
+    'context_precision',
     'context_entity_recall',
     'context_relevance',
     'faithfulness',
@@ -28,7 +28,9 @@ const DEFAULT_SELECTED_METRICS = [
 ];
 
 // 必选指标（不可取消）
-const REQUIRED_METRICS = ['context_recall', 'context_precision'];
+// === 改动：取消必选限制，改为可自由选择 ===
+// const REQUIRED_METRICS = ['context_recall', 'context_precision'];  // 原必选配置
+const REQUIRED_METRICS = [];  // 改动：置空，允许自由选择任意指标组合
 
 // 将配置暴露到全局，供其他脚本使用
 window.ALL_RAGAS_METRICS = ALL_RAGAS_METRICS;
@@ -119,7 +121,7 @@ function updateCheckboxes(selectedMetrics) {
         if (checkbox) {
             checkbox.checked = selectedMetrics.includes(metric);
             
-            // 必选项保持禁用状态
+            // 必选项保持禁用状态（REQUIRED_METRICS 为空时此逻辑不生效）
             if (REQUIRED_METRICS.includes(metric)) {
                 checkbox.disabled = true;
                 checkbox.checked = true;
@@ -136,10 +138,11 @@ async function saveRagasSettings() {
     const selectedMetrics = getSelectedMetrics();
     
     // 验证必选项
-    if (!selectedMetrics.includes('context_recall') || !selectedMetrics.includes('context_precision')) {
-        showToast('Context Recall 和 Context Precision 是必选指标', 'error');
-        return;
-    }
+    // === 改动：取消必选校验，改为可自由选择任意指标 ===
+    // if (!selectedMetrics.includes('context_recall') || !selectedMetrics.includes('context_precision')) {
+    //     showToast('Context Recall 和 Context Precision 是必选指标', 'error');
+    //     return;
+    // }
     
     // 至少选择一个指标
     if (selectedMetrics.length === 0) {

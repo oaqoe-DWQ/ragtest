@@ -34,6 +34,9 @@ from ragas.llms import LangchainLLMWrapper
 from langchain_openai import ChatOpenAI
 from ragas.testset import TestsetGenerator
 
+# 导入 Dify LLM 支持
+from dify_llm import DifyLLM, create_dify_llm
+
 # 加载环境变量
 load_dotenv()
 
@@ -45,39 +48,66 @@ class StandardDatasetBuilder:
     """标准数据集构建器"""
     
     def __init__(self, knowledge_doc_dir: str = "knowledgeDoc", 
-                 standard_dataset_path: str = "standardDataset/standardDataset_build.xlsx"):
+                 standard_dataset_path: str = "standardDataset/standardDataset_build.xlsx",
+                 use_dify: bool = None):
         self.knowledge_doc_dir = Path(knowledge_doc_dir)
         self.standard_dataset_path = Path(standard_dataset_path)
         
-        # 配置OpenAI客户端
+        # 判断是否使用 Dify（默认从环境变量读取）
+        if use_dify is None:
+            use_dify = os.getenv("USE_DIFY", "false").lower() == "true"
+        self.use_dify = use_dify
+        
+        # 配置 OpenAI 客户端（用于生成标准答案）
         self.openai_client = openai.OpenAI(
             api_key=os.getenv('OPENAI_API_KEY') or os.getenv('QWEN_API_KEY'),
             base_url=os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1')
         )
         
-        # 配置 Langchain LLM（使用稳定的采样参数）
-        # 注意：Qwen API 要求参数显式指定，不能使用 model_kwargs
+        # 配置 LLM（根据开关选择 Dify 或 ChatOpenAI）
+        if self.use_dify:
+            # 使用 Dify API
+            self._setup_dify_llm()
+        else:
+            # 使用 ChatOpenAI/Qwen API
+            self._setup_chatopenai_llm()
+    
+    def _setup_chatopenai_llm(self):
+        """配置 ChatOpenAI/Qwen LLM"""
         self.llm = ChatOpenAI(
             model=os.getenv('MODEL_NAME', 'qwen-plus'),
             api_key=os.getenv('OPENAI_API_KEY') or os.getenv('QWEN_API_KEY'),
             base_url=os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1'),
-            temperature=0.0,  # 降低到 0.0 以获得更稳定的输出
-            top_p=0.1,  # 只从最高概率的 10% token 中选择
-            max_tokens=2000  # 最大生成长度
+            temperature=0.0,
+            top_p=0.1,
+            max_tokens=2000
         )
-        
-        # 配置 Ragas LLM（使用稳定的采样参数）
-        # 注意：Qwen API 要求参数显式指定，不能使用 model_kwargs
         self.ragas_llm = LangchainLLMWrapper(
             ChatOpenAI(
                 model=os.getenv('MODEL_NAME', 'qwen-plus'),
                 api_key=os.getenv('OPENAI_API_KEY') or os.getenv('QWEN_API_KEY'),
                 base_url=os.getenv('OPENAI_API_BASE', 'https://api.openai.com/v1'),
-                temperature=0.0,  # 降低到 0.0 以获得更稳定的输出
-                top_p=0.1,  # 只从最高概率的 10% token 中选择
-                max_tokens=2000  # 最大生成长度
+                temperature=0.0,
+                top_p=0.1,
+                max_tokens=2000
             )
         )
+        info_print("🤖 LLM配置: 使用 ChatOpenAI/Qwen API")
+    
+    def _setup_dify_llm(self):
+        """配置 Dify LLM"""
+        dify_llm = create_dify_llm(
+            api_key=os.getenv("DIFY_API_KEY", ""),
+            api_url=os.getenv("DIFY_URL", ""),
+            app_id=os.getenv("DIFY_APP_ID"),
+            streaming=os.getenv("DIFY_STREAMING", "false").lower() == "true",
+            temperature=0.0,
+            max_tokens=2000,
+            top_p=0.1
+        )
+        self.llm = dify_llm
+        self.ragas_llm = LangchainLLMWrapper(dify_llm)
+        info_print("🤖 LLM配置: 使用 Dify API")
         
     def load_knowledge_documents(self) -> List[Dict[str, Any]]:
         """
@@ -183,18 +213,28 @@ class StandardDatasetBuilder:
 
 请直接给出答案:"""
 
-            # 调用LLM生成答案
-            response = self.openai_client.chat.completions.create(
-                model=os.getenv('MODEL_NAME', 'qwen-plus'),
-                messages=[
-                    {"role": "system", "content": "你是一个专业的问答助手，能够基于提供的上下文信息生成准确的标准答案。请直接给出答案内容，不要添加任何前缀如'标准答案：'、'答案：'等。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=1000
-            )
-            
-            reference_answer = response.choices[0].message.content.strip()
+            # 根据开关选择调用方式
+            if self.use_dify:
+                # 使用 Dify API 生成答案
+                from langchain_core.messages import HumanMessage, SystemMessage
+                messages = [
+                    SystemMessage(content="你是一个专业的问答助手，能够基于提供的上下文信息生成准确的标准答案。请直接给出答案内容，不要添加任何前缀如'标准答案：'、'答案：'等。"),
+                    HumanMessage(content=prompt)
+                ]
+                response = await self.llm.ainvoke(messages)
+                reference_answer = response.content.strip()
+            else:
+                # 使用 OpenAI/Qwen API 生成答案
+                response = self.openai_client.chat.completions.create(
+                    model=os.getenv('MODEL_NAME', 'qwen-plus'),
+                    messages=[
+                        {"role": "system", "content": "你是一个专业的问答助手，能够基于提供的上下文信息生成准确的标准答案。请直接给出答案内容，不要添加任何前缀如'标准答案：'、'答案：'等。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=1000
+                )
+                reference_answer = response.choices[0].message.content.strip()
             
             # 清理可能包含的前缀字符串
             reference_answer = self.clean_reference_answer(reference_answer)

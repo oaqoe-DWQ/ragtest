@@ -8,7 +8,7 @@ import asyncio
 from typing import Dict, List
 import statistics
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8100"
 
 class PerformanceTester:
     """性能测试器"""

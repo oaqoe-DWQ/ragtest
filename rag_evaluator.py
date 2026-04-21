@@ -115,7 +115,8 @@ class RagasMetricsConfig:
     ]
     
     # 必选指标（不可禁用）
-    REQUIRED_METRICS = ['context_recall', 'context_precision']
+    # === 改动：取消必选限制，改为可自由选择 ===
+    # REQUIRED_METRICS = ['context_recall', 'context_precision']  # 原必选配置
     
     # 配置文件路径
     CONFIG_FILE = "ragas_metrics_config.json"
@@ -130,9 +131,10 @@ class RagasMetricsConfig:
         self.enabled_metrics = enabled_metrics or self.DEFAULT_METRICS.copy()
         
         # 确保必选指标始终启用
-        for metric in self.REQUIRED_METRICS:
-            if metric not in self.enabled_metrics:
-                self.enabled_metrics.append(metric)
+        # === 改动：取消必选强制注入，允许自由选择任意指标组合 ===
+        # for metric in self.REQUIRED_METRICS:
+        #     if metric not in self.enabled_metrics:
+        #         self.enabled_metrics.append(metric)
     
     def save(self) -> None:
         """保存配置到文件"""

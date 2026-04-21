@@ -492,13 +492,14 @@ async def save_ragas_config(request: dict):
         enabled_metrics = request.get("enabled_metrics", [])
         
         # 验证必选指标
-        required = ['context_recall', 'context_precision']
-        for metric in required:
-            if metric not in enabled_metrics:
-                return EvaluationResponse(
-                    success=False,
-                    message=f"必选指标 {metric} 不能取消"
-                )
+        # === 改动：取消必选校验，改为可自由选择任意指标 ===
+        # required = ['context_recall', 'context_precision']
+        # for metric in required:
+        #     if metric not in enabled_metrics:
+        #         return EvaluationResponse(
+        #             success=False,
+        #             message=f"必选指标 {metric} 不能取消"
+        #         )
         
         # 保存配置
         config = RagasMetricsConfig(enabled_metrics=enabled_metrics)

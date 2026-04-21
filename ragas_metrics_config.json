@@ -1,7 +1,6 @@
 {
   "enabled_metrics": [
-    "context_recall",
-    "context_precision"
+    "faithfulness"
   ],
   "version": "1.0"
 }
