@@ -836,7 +836,7 @@ class ResultAnalyzer:
             Dict[str, Any]: 分析后的结果字典
         """
         info_print("📊 分析评估结果...")
-        
+
         # 保存原始样本数据
         sample_data = []
         if df is not None:

@@ -169,9 +169,12 @@ async def build_dataset_page():
         content = f.read()
     return HTMLResponse(content=content)
 
-# 全局变量存储评估结果
-bm25_results = None
-ragas_results = {}
+# 全局变量存储评估结果（按数据集文件隔离，支持多标签页并发评估）
+# === 改动：改为字典结构，按 dataset_file 作为 key ===
+# bm25_results = None  # 原：单一全局变量
+# ragas_results = {}    # 原：单一全局变量
+bm25_results = {}  # 改动：{ dataset_file: results }
+ragas_results = {}  # 改动：{ dataset_file: results }
 
 class EvaluationRequest(BaseModel):
     """评估请求模型"""
@@ -186,6 +189,8 @@ class SaveEvaluationRequest(BaseModel):
     """保存评估结果请求模型"""
     evaluation_type: str  # "BM25" 或 "RAGAS"
     description: str = ""
+    # === 改动：增加 dataset_file 字段，支持按数据集隔离保存 ===
+    dataset_file: str = "standardDataset.xlsx"
 
 class BM25CombinedResults(BaseModel):
     """BM25合并结果模型"""
@@ -401,13 +406,11 @@ async def run_ndcg_evaluation(request: Optional[EvaluationRequest] = None):
 @app.post("/api/bm25/evaluate", response_model=EvaluationResponse)
 async def run_bm25_evaluation(request: Optional[EvaluationRequest] = None):
     """运行BM25评估"""
-    global bm25_results
+    # 获取数据集文件路径
+    dataset_file = "standardDataset.xlsx" if request is None else request.dataset_file
+    excel_file_path = f"standardDataset/{dataset_file}"
     
     try:
-        # 获取数据集文件路径
-        dataset_file = "standardDataset.xlsx" if request is None else request.dataset_file
-        excel_file_path = f"standardDataset/{dataset_file}"
-        
         # 创建配置
         config = EvaluationConfig(
             api_key=os.getenv("QWEN_API_KEY", "dummy_key"),
@@ -447,8 +450,10 @@ async def run_bm25_evaluation(request: Optional[EvaluationRequest] = None):
             "f1_scores": f1_results.get("f1_scores", [])
         }
         
-        bm25_results = results
-        info_print(f"🔍 调试: 设置bm25_results全局变量，包含{len(results.get('detailed_results', []))}个详细结果")
+        # === 改动：按数据集文件隔离存储，支持多标签页并发评估 ===
+        # bm25_results = results  # 原：单一全局变量
+        bm25_results[dataset_file] = results
+        info_print(f"🔍 调试: BM25评估结果已按数据集 [{dataset_file}] 隔离存储")
         
         return EvaluationResponse(
             success=True,
@@ -526,7 +531,8 @@ async def save_ragas_config(request: dict):
 @app.post("/api/ragas/evaluate", response_model=EvaluationResponse)
 async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
     """运行Ragas评估"""
-    global ragas_results
+    # === 改动：字典操作不需要 global，改为 ragas_results[dataset_file] 写入 ===
+    # global ragas_results  # 原：单一全局变量
     
     try:
         # 获取数据集文件路径
@@ -615,9 +621,10 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
             "error_message": results.get("error_message", "")
         }
         
-        # 保存完整的评估结果到全局变量
-        global ragas_results
-        ragas_results = {
+        # 保存完整的评估结果到全局变量（按数据集文件隔离）
+        # === 改动：改为 ragas_results[dataset_file] = {...} 支持多数据集并发 ===
+        # ragas_results = {...}  # 原：单一全局变量
+        ragas_results[dataset_file] = {
             "context_recall": results.get("context_recall", 0),
             "context_precision": results.get("context_precision", 0),
             "faithfulness": results.get("faithfulness", 0),
@@ -635,12 +642,13 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
             "sample_data": results.get("sample_data", []),  # 原始样本数据
         }
         
-        info_print(f"✅ Ragas评估结果已保存到全局变量，fallback_mode: {ragas_results.get('fallback_mode', False)}")
+        info_print(f"✅ Ragas评估结果已按数据集 [{dataset_file}] 隔离存储，fallback_mode: {ragas_results[dataset_file].get('fallback_mode', False)}")
         
         # 自动导出详情到shuju文件夹
         export_path = None
         try:
-            export_path = export_ragas_detail_to_excel(ragas_results)
+            # === 改动：使用隔离后的 ragas_results[dataset_file] ===
+            export_path = export_ragas_detail_to_excel(ragas_results[dataset_file])
             info_print(f"📄 详情已自动导出到: {export_path}")
         except Exception as export_err:
             info_print(f"⚠️ 自动导出失败（不影响评估结果）: {export_err}")
@@ -648,7 +656,8 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
         # 自动导出总体测试报告到Overall_testreport文件夹
         report_path = None
         try:
-            report_path = export_overall_testreport(ragas_results)
+            # === 改动：使用隔离后的 ragas_results[dataset_file] ===
+            report_path = export_overall_testreport(ragas_results[dataset_file])
             info_print(f"📊 总体测试报告已自动导出到: {report_path}")
         except Exception as report_err:
             info_print(f"⚠️ 总体测试报告导出失败（不影响评估结果）: {report_err}")
@@ -662,7 +671,8 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
             else:
                 info_print("⏳ 评估完成，30秒后发送邮件通知...")
                 time.sleep(30)
-                email_sent = send_evaluation_result_email(ragas_results, export_path, report_path)
+                # === 改动：使用隔离后的 ragas_results[dataset_file] ===
+                email_sent = send_evaluation_result_email(ragas_results[dataset_file], export_path, report_path)
                 if email_sent:
                     info_print("📧 评估结果邮件已发送")
                 else:
@@ -686,39 +696,32 @@ async def run_ragas_evaluation(request: Optional[EvaluationRequest] = None):
         )
 
 @app.post("/api/ragas/export-detail", response_model=EvaluationResponse)
-async def export_ragas_detail(request: Optional[EvaluationRequest] = None):
+async def export_ragas_detail(request: EvaluationRequest):
     """导出Ragas评估详情到Excel文件"""
-    global ragas_results
+    # === 改动：按 dataset_file 隔离获取结果 ===
+    dataset_file = request.dataset_file
+    results = ragas_results.get(dataset_file)
     
-    try:
-        if not ragas_results:
-            return EvaluationResponse(
-                success=False,
-                message="没有Ragas评估结果可导出，请先运行评估"
-            )
-        
-        # 导出到Excel
-        output_path = export_ragas_detail_to_excel(ragas_results)
-        
-        info_print(f"✅ Ragas详情已导出到: {output_path}")
-        
-        return EvaluationResponse(
-            success=True,
-            message="导出成功",
-            data={
-                "file_path": output_path,
-                "filename": os.path.basename(output_path)
-            }
-        )
-        
-    except Exception as e:
-        error_msg = f"导出Ragas详情失败: {str(e)}"
-        info_print(error_msg)
-        traceback.print_exc()
+    if not results:
         return EvaluationResponse(
             success=False,
-            message=error_msg
+            message=f"数据集 [{dataset_file}] 暂无Ragas评估结果可导出，请先运行评估"
         )
+    
+    # 导出到Excel
+    output_path = export_ragas_detail_to_excel(results)
+    
+    info_print(f"✅ Ragas详情已导出到: {output_path}")
+    
+    return EvaluationResponse(
+        success=True,
+        message="导出成功",
+        data={
+            "file_path": output_path,
+            "filename": os.path.basename(output_path)
+        }
+    )
+
 
 @app.get("/api/overall-report/download/{filename}")
 async def download_overall_report(filename: str):
@@ -789,18 +792,18 @@ async def list_overall_reports():
         )
 
 @app.get("/api/bm25/details", response_model=EvaluationResponse)
-async def get_bm25_details():
+async def get_bm25_details(dataset_file: str = "standardDataset.xlsx"):
     """获取BM25评估详情"""
-    global bm25_results
+    # === 改动：按数据集文件隔离获取结果 ===
+    # global bm25_results; results = bm25_results  # 原：单一全局变量
+    results = bm25_results.get(dataset_file)
     
-    info_print(f"🔍 调试: BM25详情API调用，bm25_results状态: {bm25_results is not None}")
-    if bm25_results:
-        info_print(f"🔍 调试: bm25_results包含{len(bm25_results.get('detailed_results', []))}个详细结果")
+    info_print(f"🔍 调试: BM25详情API调用，数据集 [{dataset_file}]，结果: {results is not None}")
     
-    if not bm25_results:
+    if not results:
         return EvaluationResponse(
             success=False,
-            message="请先运行BM25评估"
+            message=f"数据集 [{dataset_file}] 暂无BM25评估结果，请先运行评估"
         )
     
     # 格式化详细结果
@@ -808,7 +811,7 @@ async def get_bm25_details():
     sample_analysis = {}
     
     # 组织不相关分块
-    for chunk_info in bm25_results.get('irrelevant_chunks', []):
+    for chunk_info in results.get('irrelevant_chunks', []):
         row_idx = chunk_info['row_index']
         if row_idx not in sample_analysis:
             sample_analysis[row_idx] = {
@@ -820,7 +823,7 @@ async def get_bm25_details():
         sample_analysis[row_idx]['irrelevant_chunks'].append(chunk_info)
     
     # 组织未召回分块
-    for chunk_info in bm25_results.get('missed_chunks', []):
+    for chunk_info in results.get('missed_chunks', []):
         row_idx = chunk_info['row_index']
         if row_idx not in sample_analysis:
             sample_analysis[row_idx] = {
@@ -832,7 +835,7 @@ async def get_bm25_details():
         sample_analysis[row_idx]['missed_chunks'].append(chunk_info)
     
     # 组织相关分块（与不相关分块、未召回分块保持一致）
-    for chunk_info in bm25_results.get('relevant_chunks', []):
+    for chunk_info in results.get('relevant_chunks', []):
         row_idx = chunk_info['row_index']
         if row_idx not in sample_analysis:
             sample_analysis[row_idx] = {
@@ -1087,28 +1090,30 @@ def generate_sample_description(user_input, precision, recall, relevant_count, i
         return f"{sample_desc}: 检索质量中等，Precision: {precision*100:.1f}%, Recall: {recall*100:.1f}%"
 
 @app.get("/api/ragas/details", response_model=EvaluationResponse)
-async def get_ragas_details():
+async def get_ragas_details(dataset_file: str = "standardDataset.xlsx"):
     """获取Ragas评估详情"""
-    global ragas_results
+    # === 改动：按 dataset_file 隔离获取结果 ===
+    # global ragas_results; results = ragas_results  # 原：单一全局变量
+    results = ragas_results.get(dataset_file)
     
     # 检查是否有评估结果
-    if not ragas_results or not ragas_results.get('evaluation_completed', False):
+    if not results or not results.get('evaluation_completed', False):
         return EvaluationResponse(
             success=False,
-            message="请先运行Ragas评估"
+            message=f"数据集 [{dataset_file}] 暂无Ragas评估结果，请先运行评估"
         )
     
     # 检查是否是fallback模式
-    is_fallback = ragas_results.get('fallback_mode', False)
+    is_fallback = results.get('fallback_mode', False)
     if is_fallback:
         return EvaluationResponse(
             success=False,
-            message=f"Ragas评估处于fallback模式，无法提供详细分析。错误信息: {ragas_results.get('error_message', '未知错误')}"
+            message=f"Ragas评估处于fallback模式，无法提供详细分析。错误信息: {results.get('error_message', '未知错误')}"
         )
     
     try:
-        # 获取评估时使用的数据集文件
-        dataset_file = ragas_results.get('dataset_file', 'standardDataset.xlsx')
+        # 获取评估时使用的数据集文件（从结果中取，保证一致性）
+        # === 改动：优先使用传入的 dataset_file 参数 ===
         excel_file_path = f"standardDataset/{dataset_file}"
         
         info_print(f"📊 查看Ragas明细，使用数据集: {dataset_file}")
@@ -1223,7 +1228,8 @@ async def get_ragas_details():
             })
         
         # 生成样本汇总分析
-        sample_summary = generate_sample_summary(details, ragas_results)
+        # === 改动：使用隔离后的 results 而非 ragas_results ===
+        sample_summary = generate_sample_summary(details, results)
         
         return EvaluationResponse(
             success=True,
@@ -1231,7 +1237,8 @@ async def get_ragas_details():
             data={
                 'details': details,
                 'sample_summary': sample_summary,
-                'ragas_raw_results': ragas_results.get('raw_results', None)
+                # === 改动：使用隔离后的 results ===
+                'ragas_raw_results': results.get('raw_results', None)
             }
         )
         
@@ -1295,15 +1302,17 @@ async def save_evaluation(request: SaveEvaluationRequest):
                 message="无效的评估类型，必须是BM25或RAGAS"
             )
         
-        # 获取对应的评估结果
+        # 获取对应的评估结果（按数据集文件隔离）
+        # === 改动：按 request.dataset_file 获取对应数据集的评估结果 ===
         if request.evaluation_type == "BM25":
-            if not bm25_results:
+            results = bm25_results.get(request.dataset_file)
+            if not results:
                 return SaveEvaluationResponse(
                     success=False,
-                    message="没有BM25评估结果可保存，请先运行评估"
+                    message=f"数据集 [{request.dataset_file}] 暂无BM25评估结果，请先运行评估"
                 )
             # 使用原始的BM25结果，但需要确保包含所有指标
-            results = bm25_results.copy()
+            results = results.copy()
             
             # 如果结果中没有新指标，尝试从全局变量获取
             if 'mrr' not in results or 'map' not in results or 'ndcg' not in results:
@@ -1312,12 +1321,12 @@ async def save_evaluation(request: SaveEvaluationRequest):
                 results.setdefault('map', 0)
                 results.setdefault('ndcg', 0)
         else:  # RAGAS
-            if not ragas_results:
+            results = ragas_results.get(request.dataset_file)
+            if not results:
                 return SaveEvaluationResponse(
                     success=False,
-                    message="没有Ragas评估结果可保存，请先运行评估"
+                    message=f"数据集 [{request.dataset_file}] 暂无Ragas评估结果，请先运行评估"
                 )
-            results = ragas_results
         
         # 保存到数据库
         if request.evaluation_type == "BM25":
@@ -1370,16 +1379,18 @@ async def get_evaluation_history():
         )
 
 @app.get("/api/ragas-status")
-async def get_ragas_status():
+async def get_ragas_status(dataset_file: str = "standardDataset.xlsx"):
     """获取Ragas评估状态"""
-    global ragas_results
+    # === 改动：按 dataset_file 隔离获取状态 ===
+    # global ragas_results  # 原：单一全局变量
+    results = ragas_results.get(dataset_file)
     
     try:
-        if not ragas_results:
+        if not results:
             return EvaluationResponse(
                 success=False,
-                message="没有Ragas评估结果",
-                data={'has_results': False}
+                message=f"数据集 [{dataset_file}] 暂无Ragas评估结果",
+                data={'has_results': False, 'dataset_file': dataset_file}
             )
         
         return EvaluationResponse(
@@ -1387,10 +1398,11 @@ async def get_ragas_status():
             message="Ragas评估状态正常",
             data={
                 'has_results': True,
-                'evaluation_completed': ragas_results.get('evaluation_completed', False),
-                'fallback_mode': ragas_results.get('fallback_mode', False),
-                'error_message': ragas_results.get('error_message', ''),
-                'has_metrics': any(ragas_results.get(metric) is not None for metric in 
+                'dataset_file': dataset_file,
+                'evaluation_completed': results.get('evaluation_completed', False),
+                'fallback_mode': results.get('fallback_mode', False),
+                'error_message': results.get('error_message', ''),
+                'has_metrics': any(results.get(metric) is not None for metric in 
                                  ['faithfulness', 'answer_relevancy', 'context_precision', 'context_recall'])
             }
         )

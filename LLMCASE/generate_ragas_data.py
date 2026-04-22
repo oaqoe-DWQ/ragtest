@@ -1,20 +1,18 @@
 # -*- coding: utf-8 -*-
 """
 Ragas评估数据生成脚本
-功能：从testcase.xlsx读取query和标准答案，调用召回接口和LLM接口，生成标准Ragas评估数据
+功能：读取query和标准答案，调用召回接口，生成标准Ragas评估数据
 """
 
 import os
-from re import T
 import sys
 import json
 import signal
-import requests
+import asyncio
+import httpx
 import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 # 设置UTF-8编码
 if sys.platform == 'win32':
@@ -26,8 +24,6 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_dir = os.path.dirname(script_dir)
 sys.path.insert(0, project_dir)
 
-from dify_llm import DifyLLM
-from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -43,27 +39,32 @@ class RagasDataGenerator:
     """Ragas评估数据生成器"""
 
     # 召回接口配置
-    RETRIEVAL_API_URL = "https://ytidc.zy.com:32212/rag_it_help/rag_it_help/v1/knowledge/dev/retrieve"
+    RETRIEVAL_API_URL = "https://ytidc.zy.com:32212/rag_it_help/rag_it_help/v1/knowledge/test/retrieve"
 
     # 检索设置
     DEFAULT_TOP_K = 5
     DEFAULT_SCORE_THRESHOLD = 0.5
     DEFAULT_VECTOR_WEIGHT = 0.8
 
-    def __init__(self, test_mode: bool = False):
-        """初始化
+    # 异步并发配置
+    MAX_CONCURRENT = 2  # 最大并发数，可配置
+    REQUEST_INTERVAL = 5  # 请求间隔秒数（用于限流）
+    RESUME_FROM_CHECKPOINT = True  # 是否从检查点恢复，可配置
 
-        Args:
-            test_mode: 测试模式，只调用召回接口，不调用LLM
-        """
-        self.test_mode = test_mode
-        self.dify_url = os.getenv("DIFY_URL", "")
-        self.dify_api_key = os.getenv("DIFY_API_KEY", "")
+    def __init__(self):
+        """初始化"""
         self.knowledge_id = os.getenv("KNOWLEDGE_ID", "parsed_files_title_re")
+
+        # 异步并发配置
+        self.max_concurrent = int(os.getenv("MAX_CONCURRENT", self.MAX_CONCURRENT))
+        self.request_interval = float(os.getenv("REQUEST_INTERVAL", self.REQUEST_INTERVAL))
+        self.resume_from_checkpoint = os.getenv("RESUME_FROM_CHECKPOINT", str(self.RESUME_FROM_CHECKPOINT)).lower() == 'true'
+        # 自定义检查点路径
+        self.checkpoint_path = "D:\\Agelo\\rag_evaluate_ragas_BM25\\LLMCASE\\标准数据\\单轮未标准化测试集_标准化数据_20260422_104127.xlsx.checkpoint.xlsx"
 
         # 中断保存机制
         self._stop_flag = False
-        self._stop_lock = threading.Lock()
+        self._stop_lock = asyncio.Lock()
         self._processed_results = []
         self._checkpoint_interval = 5  # 每处理5条保存一次
 
@@ -72,34 +73,20 @@ class RagasDataGenerator:
         log("=" * 60)
         log(f"召回接口URL: {self.RETRIEVAL_API_URL}")
         log(f"知识库ID: {self.knowledge_id}")
-        log(f"Dify URL: {self.dify_url}")
+        log(f"最大并发数: {self.max_concurrent}")
+        log(f"请求间隔: {self.request_interval} 秒")
+        log(f"从检查点恢复: {self.resume_from_checkpoint}")
         log("")
 
-        # 初始化LLM
-        self.llm = None
-        if not self.test_mode and self.dify_url and self.dify_api_key:
-            try:
-                self.llm = DifyLLM(
-                    dify_url=self.dify_url,
-                    api_key=self.dify_api_key,
-                    temperature=0.0,
-                    max_tokens=2000
-                )
-                log("[OK] LLM初始化成功")
-            except Exception as e:
-                log(f"[ERROR] LLM初始化失败: {e}")
-        else:
-            log("[WARN] 未配置Dify API，跳过LLM调用")
-
-    def set_stop_flag(self):
+    async def set_stop_flag(self):
         """设置停止标志（用于中断保存）"""
-        with self._stop_lock:
+        async with self._stop_lock:
             self._stop_flag = True
         log("[中断] 收到停止信号，正在保存进度...")
 
-    def is_stopped(self) -> bool:
+    async def is_stopped(self) -> bool:
         """检查是否收到停止信号"""
-        with self._stop_lock:
+        async with self._stop_lock:
             return self._stop_flag
 
     def save_checkpoint(self, results: List[dict], output_path: str):
@@ -126,23 +113,20 @@ class RagasDataGenerator:
             log(f"[ERROR] 保存检查点失败: {e}")
             return False
 
-    def call_retrieval_api(self, query: str, top_k: int = None) -> List[str]:
+    async def call_retrieval_api(self, client: httpx.AsyncClient, query: str, top_k: int = None) -> tuple:
         """
-        调用召回接口获取检索结果
+        异步调用召回接口获取检索结果和LLM回答
 
         Args:
+            client: httpx异步客户端
             query: 查询文本
             top_k: 返回结果数量
 
         Returns:
-            List[str]: 检索到的文本列表
+            tuple: (retrieved_contexts: List[str], llm_answer: str)
         """
         if top_k is None:
             top_k = self.DEFAULT_TOP_K
-
-        headers = {
-            "Content-Type": "application/json"
-        }
 
         payload = {
             "query": query,
@@ -153,96 +137,86 @@ class RagasDataGenerator:
                 "score_threshold": self.DEFAULT_SCORE_THRESHOLD,
                 "vector_weight": self.DEFAULT_VECTOR_WEIGHT
             },
-            "rewrite": True 
+            "rewrite": True
         }
 
-        try:
-            log(f"  [调用] 召回接口: query='{query[:50]}...'")
+        last_error = None
+        for attempt in range(3):
+            if attempt > 0:
+                wait_time = 4 * (2 ** (attempt - 1))
+                log(f"  [重试] 第{attempt}次重试，等待{wait_time}秒...")
+                await asyncio.sleep(wait_time)
 
-            # 重试机制：最多重试2次，间隔5秒
-            last_error = None
-            response = None
-            for attempt in range(3):  # 1次尝试 + 2次重试
-                if attempt > 0:
-                    log(f"  [重试] 第{attempt}次重试，等待5秒...")
-                    import time
-                    time.sleep(5)
-
-                try:
-                    response = requests.post(
-                        self.RETRIEVAL_API_URL,
-                        headers=headers,
-                        json=payload,
-                        timeout=30
-                    )
-
-                    if response.status_code == 200:
-                        result = response.json()
-                        # 提取results中的text字段
-                        texts = []
-                        if "results" in result:
-                            for item in result["results"]:
-                                if "text" in item:
-                                    texts.append(item["text"])
-                        log(f"  [OK] 召回成功，获取 {len(texts)} 条结果")
-                        return texts
+            try:
+                response = await client.post(
+                    self.RETRIEVAL_API_URL,
+                    json=payload,
+                    timeout=30.0
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    # 提取results中的text字段
+                    texts = []
+                    if "results" in result:
+                        for item in result["results"]:
+                            if "text" in item:
+                                texts.append(item["text"])
+                    # 提取llm_answer
+                    llm_answer = result.get("llm_answer", "")
+                    return texts, llm_answer
+                else:
+                    last_error = f"HTTP {response.status_code}"
+                    if response.status_code in [429, 500, 502, 503, 504]:
+                        continue
                     else:
-                        last_error = f"HTTP {response.status_code}"
-                        log(f"  [错误] 尝试{attempt + 1}失败: {last_error}")
-                        if response.status_code in [429, 500, 502, 503, 504]:
-                            continue  # 服务器错误，重试
-                        else:
-                            break  # 客户端错误，不重试
+                        break
 
-                except requests.exceptions.Timeout:
-                    last_error = "请求超时"
-                    log(f"  [错误] 尝试{attempt + 1}失败: 请求超时")
-                    continue
-                except requests.exceptions.RequestException as e:
-                    last_error = str(e)
-                    log(f"  [错误] 尝试{attempt + 1}失败: {e}")
-                    continue
+            except httpx.TimeoutException:
+                last_error = "请求超时"
+                continue
+            except httpx.HTTPError as e:
+                last_error = str(e)
+                continue
 
-            log(f"  [ERROR] 召回失败: {last_error}")
-            if response:
-                log(f"     响应: {response.text[:200]}")
-            return []
+        log(f"  [ERROR] 召回失败: {last_error}")
+        return [], ""
 
-        except json.JSONDecodeError as e:
-            log(f"  [ERROR] 解析响应失败: {e}")
-            return []
-
-    def call_llm_api(self, query: str, context: str = "") -> str:
+    async def _process_single_item(self, idx: int, query: str, reference: str, client: httpx.AsyncClient) -> Optional[dict]:
         """
-        调用LLM接口获取回答
+        异步处理单个样本
 
         Args:
-            query: 用户问题
-            context: 上下文（可选）
+            idx: 索引
+            query: 查询文本
+            reference: 标准答案
+            client: httpx异步客户端
 
         Returns:
-            str: LLM回答
+            dict: 处理结果
         """
-        if self.llm is None:
-            log(f"  [WARN] LLM未初始化，使用空回答")
-            return ""
+        if await self.is_stopped():
+            return None
 
-        try:
-            # 构建prompt
-            if context:
-                prompt = f"请根据以下上下文回答用户问题。\n\n上下文：\n{context}\n\n用户问题：{query}"
-            else:
-                prompt = query
+        log(f"  [{idx + 1}] 查询: {query[:50]}...")
 
-            log(f"  [调用] LLM接口...")
-            response = self.llm.invoke([HumanMessage(content=prompt)])
-            answer = response.content if hasattr(response, 'content') else str(response)
-            log(f"  [OK] LLM回答成功，长度: {len(answer)} 字符")
-            return answer
+        # 异步调用召回接口
+        retrieved_contexts, llm_answer = await self.call_retrieval_api(client, query)
 
-        except Exception as e:
-            log(f"  [ERROR] LLM调用失败: {e}")
-            return ""
+        # 定义块分隔符
+        BLOCK_SEPARATOR = "<<<__CONTEXT_BLOCK__>>>"
+
+        # 将检索结果合并为单个字符串
+        context_text = BLOCK_SEPARATOR.join(retrieved_contexts) if retrieved_contexts else ""
+
+        # 构建结果
+        return {
+            '_original_idx': idx,
+            'user_input': query,
+            'retrieved_contexts': context_text,
+            'response': llm_answer,
+            'reference_contexts': "无标准答案上下文",
+            'reference': reference
+        }
 
     def load_testcase(self, file_path: str) -> pd.DataFrame:
         """
@@ -265,21 +239,20 @@ class RagasDataGenerator:
             log(f"[ERROR] 加载失败: {e}")
             return None
 
-    def generate_ragas_data(self, testcase_df: pd.DataFrame, output_path: str, use_llm: bool = True) -> bool:
+    async def generate_ragas_data_async(self, testcase_df: pd.DataFrame, output_path: str) -> bool:
         """
-        生成Ragas评估数据
+        异步生成Ragas评估数据
 
         Args:
             testcase_df: 测试用例DataFrame
             output_path: 输出文件路径
-            use_llm: 是否调用LLM接口
 
         Returns:
             bool: 是否成功
         """
         log("")
         log("=" * 60)
-        log("开始生成Ragas评估数据")
+        log("开始生成Ragas评估数据（异步模式）")
         log("=" * 60)
 
         # 检查必要的列 - 尝试多种可能的列名
@@ -302,75 +275,120 @@ class RagasDataGenerator:
 
         log(f"[INFO] 使用列: query='{query_col}', reference='{reference_col}'")
 
-        # 收集待处理数据
-        results = []
+        # 检查是否从检查点恢复
+        checkpoint_path = self.checkpoint_path if self.checkpoint_path else output_path + ".checkpoint.xlsx"
+        resume_items = []
 
-        # 并发线程数，根据API限制调整
-        MAX_WORKERS = 2  # LLM接口可能有并发限制，建议不超过4
+        if self.resume_from_checkpoint and os.path.exists(checkpoint_path):
+            log(f"[恢复] 检测到检查点文件: {checkpoint_path}")
+            try:
+                checkpoint_df = pd.read_excel(checkpoint_path, engine='openpyxl')
+                log(f"[恢复] 已加载 {len(checkpoint_df)} 条数据")
 
-        for idx, row in testcase_df.iterrows():
-            query = str(row[query_col]) if pd.notna(row[query_col]) else ""
-            reference = str(row[reference_col]) if pd.notna(row[reference_col]) else ""
+                # 收集已处理的query
+                processed_queries = set()
+                for _, row in checkpoint_df.iterrows():
+                    if 'user_input' in row:
+                        processed_queries.add(str(row['user_input']))
+                        self._processed_results.append({
+                            '_original_idx': _,
+                            'user_input': row['user_input'],
+                            'retrieved_contexts': row.get('retrieved_contexts', ''),
+                            'response': row.get('response', ''),
+                            'reference_contexts': row.get('reference_contexts', ''),
+                            'reference': row.get('reference', '')
+                        })
 
-            if not query:
-                continue
+                # 过滤出未处理的数据
+                for idx, row in testcase_df.iterrows():
+                    query = str(row[query_col]) if pd.notna(row[query_col]) else ""
+                    reference = str(row[reference_col]) if pd.notna(row[reference_col]) else ""
 
-            results.append({
-                'idx': idx,
-                'query': query,
-                'reference': reference
-            })
+                    if not query:
+                        continue
 
-        log(f"[INFO] 共 {len(results)} 条数据，使用 {MAX_WORKERS} 个并发线程")
+                    if query not in processed_queries:
+                        resume_items.append({
+                            'idx': idx,
+                            'query': query,
+                            'reference': reference
+                        })
+
+                log(f"[恢复] 已有 {len(processed_queries)} 条完成，还剩 {len(resume_items)} 条待处理")
+            except Exception as e:
+                log(f"[ERROR] 读取检查点失败: {e}")
+                log("[恢复] 将从头开始处理")
+                for idx, row in testcase_df.iterrows():
+                    query = str(row[query_col]) if pd.notna(row[query_col]) else ""
+                    reference = str(row[reference_col]) if pd.notna(row[reference_col]) else ""
+                    if not query:
+                        continue
+                    resume_items.append({
+                        'idx': idx,
+                        'query': query,
+                        'reference': reference
+                    })
+        else:
+            # 收集待处理数据
+            for idx, row in testcase_df.iterrows():
+                query = str(row[query_col]) if pd.notna(row[query_col]) else ""
+                reference = str(row[reference_col]) if pd.notna(row[reference_col]) else ""
+
+                if not query:
+                    continue
+
+                resume_items.append({
+                    'idx': idx,
+                    'query': query,
+                    'reference': reference
+                })
+
+        log(f"[INFO] 共 {len(resume_items)} 条数据待处理，最大并发数 {self.max_concurrent}，请求间隔 {self.request_interval} 秒")
+
+        if len(resume_items) == 0:
+            log("[INFO] 没有待处理的数据")
+            return True
 
         # 重置中断标志
         self._stop_flag = False
-        self._processed_results = []
         processed_count = 0
+        results_lock = asyncio.Lock()
 
-        # 使用线程池并发处理
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            # 提交所有任务
-            future_to_data = {
-                executor.submit(self._process_single_sample, item, use_llm): item
-                for item in results
-            }
+        # 使用信号量控制并发数
+        semaphore = asyncio.Semaphore(self.max_concurrent)
 
-            # 收集结果
-            for future in as_completed(future_to_data):
-                # 检查中断信号
-                if self.is_stopped():
-                    log("[中断] 正在等待正在处理的任务完成...")
-                    break
+        # 创建异步任务
+        async with httpx.AsyncClient(limits=httpx.Limits(max_connections=self.max_concurrent)) as client:
+            tasks = []
+            for idx, item in enumerate(resume_items):
+                task = asyncio.create_task(self._process_single_item_async(idx, item, client, semaphore, results_lock))
+                tasks.append(task)
 
-                item = future_to_data[future]
-                processed_count += 1
-                try:
-                    result = future.result()
-                    if result:
+            # 等待所有任务完成
+            for coro in asyncio.as_completed(tasks):
+                item, result = await coro
+                if result:
+                    async with results_lock:
                         self._processed_results.append(result)
-                        log(f"[{processed_count}/{len(results)}] 完成: {item['query'][:30]}...")
-                    else:
-                        log(f"[{processed_count}/{len(results)}] 失败: {item['query'][:30]}...")
-                except Exception as e:
-                    log(f"[{processed_count}/{len(results)}] 异常: {e}")
-                    processed_count -= 1
+                    processed_count += 1
+                    log(f"[{processed_count}/{len(resume_items)}] 完成: {item['query'][:30]}...")
+                else:
+                    log(f"[{processed_count + 1}/{len(resume_items)}] 失败: {item['query'][:30]}...")
 
-                # 打印进度，每隔5条保存检查点
-                if processed_count % self._checkpoint_interval == 0:
-                    log(f"[进度] 已完成 {processed_count}/{len(results)}")
+                # 保存检查点
+                if processed_count > 0 and processed_count % self._checkpoint_interval == 0:
                     self.save_checkpoint(self._processed_results, output_path + ".checkpoint.xlsx")
 
         # 按原始顺序排序
         self._processed_results.sort(key=lambda x: x.get('_original_idx', 0))
 
         # 如果中断，提前保存检查点
-        if self.is_stopped():
+        if await self.is_stopped():
             self.save_checkpoint(self._processed_results, output_path + ".checkpoint.xlsx")
             log(f"[中断] 已保存 {len(self._processed_results)} 条数据到检查点文件")
             return False
 
-        # 4. 创建DataFrame并保存
+        # 创建DataFrame并保存
         if self._processed_results:
             output_df = pd.DataFrame(self._processed_results)
             # 调整列顺序并移除临时字段
@@ -383,6 +401,14 @@ class RagasDataGenerator:
                 )
 
             output_df.to_excel(output_path, index=False, engine='openpyxl')
+            # 成功后删除检查点文件
+            checkpoint_path = self.checkpoint_path if self.checkpoint_path else output_path + ".checkpoint.xlsx"
+            if os.path.exists(checkpoint_path):
+                try:
+                    os.remove(checkpoint_path)
+                    log(f"[清理] 已删除检查点文件")
+                except Exception as e:
+                    log(f"[提示] 删除检查点文件失败: {e}")
             log("")
             log("=" * 60)
             log(f"[OK] 生成完成! 共 {len(self._processed_results)} 条数据")
@@ -394,56 +420,65 @@ class RagasDataGenerator:
             log("[ERROR] 没有生成任何数据")
             return False
 
-    def _process_single_sample(self, item: dict, use_llm: bool) -> Optional[dict]:
+    async def _process_single_item_async(self, idx: int, item: dict, client: httpx.AsyncClient, 
+                                         semaphore: asyncio.Semaphore, results_lock: asyncio.Lock) -> tuple:
         """
-        处理单个样本（供并发调用）
+        异步处理单个样本（带信号量和间隔控制）
 
         Args:
-            item: 包含idx, query, reference的字典
-            use_llm: 是否调用LLM
+            idx: 序号
+            item: 数据项
+            client: httpx异步客户端
+            semaphore: 信号量
+            results_lock: 结果锁
 
         Returns:
-            dict: 处理结果
+            tuple: (item, result)
         """
-        idx = item['idx']
-        query = item['query']
-        reference = item['reference']
+        async with semaphore:
+            if await self.is_stopped():
+                return item, None
 
-        log(f"  [{idx + 1}] 查询: {query[:50]}...")
+            query = item['query']
+            reference = item['reference']
+            original_idx = item['idx']
 
-        # 1. 调用召回接口获取retrieved_contexts
-        retrieved_contexts = self.call_retrieval_api(query)
+            log(f"  [{idx + 1}] 查询: {query[:50]}...")
 
-        # 定义块分隔符
-        BLOCK_SEPARATOR = "<<<__CONTEXT_BLOCK__>>>"
+            # 异步调用召回接口
+            retrieved_contexts, llm_answer = await self.call_retrieval_api(client, query)
 
-        # 将检索结果合并为单个字符串
-        context_text = BLOCK_SEPARATOR.join(retrieved_contexts) if retrieved_contexts else ""
+            # 请求完成后等待间隔时间
+            if self.request_interval > 0:
+                await asyncio.sleep(self.request_interval)
 
-        # 2. 调用LLM接口获取response
-        if use_llm:
-            llm_answer = self.call_llm_api(query, context_text)
-        else:
-            llm_answer = ""
+            # 定义块分隔符
+            BLOCK_SEPARATOR = "<<<__CONTEXT_BLOCK__>>>"
 
-        # 3. 构建结果
-        return {
-            '_original_idx': idx,
-            'user_input': query,
-            'retrieved_contexts': context_text,
-            'response': llm_answer,
-            'reference_contexts': "无标准答案上下文",
-            'reference': reference
-        }
+            # 将检索结果合并为单个字符串
+            context_text = BLOCK_SEPARATOR.join(retrieved_contexts) if retrieved_contexts else ""
+
+            # 构建结果
+            result = {
+                '_original_idx': original_idx,
+                'user_input': query,
+                'retrieved_contexts': context_text,
+                'response': llm_answer,
+                'reference_contexts': "无标准答案上下文",
+                'reference': reference
+            }
+
+            return item, result
 
 
 _generator_instance = None
+_generator_loop = None
 
 def signal_handler(signum, frame):
     """信号处理器，用于优雅中断"""
     log("\n[中断] 收到中断信号 (Ctrl+C)，正在保存进度...")
     if _generator_instance is not None:
-        _generator_instance.set_stop_flag()
+        asyncio.run(_generator_instance.set_stop_flag())
 
 def main():
     """主函数"""
@@ -463,12 +498,19 @@ def main():
         signal.signal(signal.SIGTERM, signal_handler)
 
     # 配置路径
-    testcase_path = os.path.join(project_dir, "testcase3_num2.xlsx")
-    output_path = os.path.join(script_dir, "testcase3_gaixie.xlsx")
+    testcase_path = os.path.join(script_dir, "原始数据", "单轮未标准化测试集.xlsx")
+    output_dir = os.path.join(script_dir, "标准数据")
+    os.makedirs(output_dir, exist_ok=True)
 
-    # 检查是否有检查点文件
-    checkpoint_path = output_path + ".checkpoint.xlsx"
-    resume_from_checkpoint = False
+    # 生成带时间戳的输出文件名，格式：原文档名_标准化数据_时间戳
+    source_basename = os.path.splitext(os.path.basename(testcase_path))[0]
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"{source_basename}_标准化数据_{timestamp}.xlsx"
+    output_path = os.path.join(output_dir, output_filename)
+
+    # 检查是否有检查点文件（使用配置的检查点路径）
+    generator = RagasDataGenerator()
+    checkpoint_path = generator.checkpoint_path if generator.checkpoint_path else output_path + ".checkpoint.xlsx"
 
     # 处理路径（确保是绝对路径）
     testcase_path = os.path.abspath(testcase_path)
@@ -489,22 +531,8 @@ def main():
 
     log("")
 
-    # 检查环境变量
-    if not os.getenv("RETRIEVAL_API_KEY"):
-        log("[WARN] 未设置 RETRIEVAL_API_KEY 环境变量")
-        log("   召回接口可能需要认证")
-
-    # 检查是否使用LLM
-    use_llm = False
-    if os.getenv("DIFY_URL") and os.getenv("DIFY_API_KEY"):
-        use_llm = True
-        log("[INFO] 检测到Dify配置，将调用LLM接口")
-    else:
-        log("[WARN] 未设置 DIFY_URL 或 DIFY_API_KEY")
-        log("   将跳过LLM调用，response字段将为空")
-
     # 创建生成器
-    generator = RagasDataGenerator(test_mode=not use_llm)
+    generator = RagasDataGenerator()
     _generator_instance = generator
 
     # 加载测试用例
@@ -513,12 +541,8 @@ def main():
         log("[ERROR] 加载测试用例失败，程序退出")
         return
 
-    # 生成数据
-    success = generator.generate_ragas_data(
-        testcase_df,
-        output_path,
-        use_llm=use_llm
-    )
+    # 异步生成数据
+    success = asyncio.run(generator.generate_ragas_data_async(testcase_df, output_path))
 
     if success:
         log("\n[SUCCESS] 数据生成成功!")

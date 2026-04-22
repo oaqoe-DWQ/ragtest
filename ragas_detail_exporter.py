@@ -9,6 +9,38 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 
+def _load_original_source_df(ragas_results: Dict[str, Any]) -> Optional[pd.DataFrame]:
+    """
+    根据 ragas_results 中的 dataset_file 加载对应的原始 Excel 文件，
+    返回包含 user_input / retrieved_contexts / response /
+    reference_contexts / reference 字段的 DataFrame。
+
+    如果文件不存在或出错，返回 None。
+    """
+    dataset_file = ragas_results.get("dataset_file")
+    if not dataset_file:
+        return None
+
+    # 支持 standardDataset/standardDataset.xlsx 和 standardDataset.xlsx 两种路径格式
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    search_paths = [
+        os.path.join(base_dir, dataset_file),
+        os.path.join(base_dir, "standardDataset", dataset_file),
+        os.path.join(base_dir, "LLMCASE", "标准数据", dataset_file),
+    ]
+    for path in search_paths:
+        if os.path.exists(path):
+            try:
+                df = pd.read_excel(path)
+                # 验证必要列是否存在
+                required = {"user_input", "retrieved_contexts", "response", "reference_contexts", "reference"}
+                if required.issubset(set(df.columns)):
+                    return df
+            except Exception:
+                pass
+    return None
+
+
 def export_ragas_detail_to_excel(
     ragas_results: Dict[str, Any],
     output_path: Optional[str] = None
@@ -51,6 +83,8 @@ def export_ragas_detail_to_excel(
             "user_input": "",
             "response": "",
             "reference": "",
+            "retrieved_contexts": "",
+            "reference_contexts": "",
             "faithfulness": "",
             "answer_relevancy": "",
             "context_precision": "",
@@ -59,6 +93,7 @@ def export_ragas_detail_to_excel(
             "context_relevance": "",
             "answer_correctness": "",
             "answer_similarity": "",
+            "retrieved_contexts": "",
             "备注": "无有效评估数据"
         }]
     
@@ -67,7 +102,7 @@ def export_ragas_detail_to_excel(
     
     # 调整列顺序
     columns_order = [
-        "样本ID", "user_input", "response", "reference",
+        "样本ID", "user_input", "retrieved_contexts", "response", "reference", "reference_contexts",
         "faithfulness", "answer_relevancy", "context_precision", "context_recall",
         "context_entity_recall", "context_relevance", "answer_correctness",
         "answer_similarity", "备注"
@@ -88,17 +123,19 @@ def export_ragas_detail_to_excel(
         column_widths = {
             'A': 10,   # 样本ID
             'B': 50,   # user_input
-            'C': 50,   # response
-            'D': 50,   # reference
-            'E': 15,   # faithfulness
-            'F': 18,   # answer_relevancy
-            'G': 18,   # context_precision
-            'H': 15,   # context_recall
-            'I': 20,   # context_entity_recall
-            'J': 17,   # context_relevance
-            'K': 17,   # answer_correctness
-            'L': 17,   # answer_similarity
-            'M': 30,   # 备注
+            'C': 60,   # retrieved_contexts
+            'D': 50,   # response
+            'E': 50,   # reference
+            'F': 50,   # reference_contexts
+            'G': 15,   # faithfulness
+            'H': 18,   # answer_relevancy
+            'I': 18,   # context_precision
+            'J': 15,   # context_recall
+            'K': 20,   # context_entity_recall
+            'L': 17,   # context_relevance
+            'M': 17,   # answer_correctness
+            'N': 17,   # answer_similarity
+            'O': 30,   # 备注
         }
         for col, width in column_widths.items():
             worksheet.column_dimensions[col].width = width
@@ -130,7 +167,7 @@ def export_ragas_detail_to_excel(
                 cell.border = thin_border
                 cell.alignment = Alignment(vertical='top', wrap_text=False)
                 # 指标列居中对齐
-                if cell.column_letter in ['E', 'F', 'G', 'H', 'I', 'J', 'K', 'L']:
+                if cell.column_letter in ['G', 'H', 'I', 'J', 'K', 'L', 'M', 'N']:
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                     # 如果是数值，格式化
                     if isinstance(cell.value, (int, float)) and cell.value != "":
@@ -142,6 +179,10 @@ def export_ragas_detail_to_excel(
 def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     从Ragas结果中提取每个样本的详细分数
+
+    原始文本字段（user_input / retrieved_contexts / response /
+    reference_contexts / reference）从 dataset_file 对应的原始 Excel
+    按行索引映射，确保与源文件完全一致。指标分数来自 ragas_results。
 
     Args:
         ragas_results: 包含 raw_results 的字典
@@ -157,6 +198,9 @@ def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]
 
     if raw_results is None and not original_samples:
         return sample_data
+
+    # 加载原始 Excel 文件用于映射原始字段（retrieved_contexts 等）
+    original_df = _load_original_source_df(ragas_results)
 
     # 尝试从不同的数据结构中提取样本分数
     scores_df = None
@@ -237,22 +281,35 @@ def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]
     # 如果找到了 scores DataFrame，提取每个样本的分数
     if scores_df is not None and hasattr(scores_df, 'iterrows'):
         for idx, row in scores_df.iterrows():
-            # 优先使用原始样本数据
-            if idx < len(original_samples):
+            # 优先使用原始 Excel 按行索引映射，确保 retrieved_contexts 等与源文件完全一致
+            if original_df is not None and idx < len(original_df):
+                orig_row = original_df.iloc[idx]
+                user_input = str(orig_row.get("user_input", ""))
+                retrieved_contexts = str(orig_row.get("retrieved_contexts", ""))
+                response = str(orig_row.get("response", ""))
+                reference = str(orig_row.get("reference", ""))
+                reference_contexts = str(orig_row.get("reference_contexts", ""))
+            elif idx < len(original_samples):
                 orig = original_samples[idx]
                 user_input = orig.get("user_input", "")
                 response = orig.get("response", "")
                 reference = orig.get("reference", "")
+                retrieved_contexts = orig.get("retrieved_contexts", "")
+                reference_contexts = ""
             else:
                 user_input = ""
+                retrieved_contexts = ""
                 response = ""
                 reference = ""
+                reference_contexts = ""
 
             sample = {
                 "样本ID": idx + 1,
                 "user_input": user_input,
+                "retrieved_contexts": retrieved_contexts,
                 "response": response,
                 "reference": reference,
+                "reference_contexts": reference_contexts,
             }
 
             for metric in metrics:
@@ -273,11 +330,27 @@ def _extract_sample_scores(ragas_results: Dict[str, Any]) -> List[Dict[str, Any]
         overall_scores = {m: _safe_float(_get_result_value(m)) for m in metrics}
 
         for idx, orig in enumerate(original_samples):
+            # 优先使用原始 Excel 按行索引映射
+            if original_df is not None and idx < len(original_df):
+                orig_row = original_df.iloc[idx]
+                user_input = str(orig_row.get("user_input", ""))
+                retrieved_contexts = str(orig_row.get("retrieved_contexts", ""))
+                response = str(orig_row.get("response", ""))
+                reference = str(orig_row.get("reference", ""))
+                reference_contexts = str(orig_row.get("reference_contexts", ""))
+            else:
+                user_input = orig.get("user_input", "")
+                retrieved_contexts = orig.get("retrieved_contexts", "")
+                response = orig.get("response", "")
+                reference = orig.get("reference", "")
+                reference_contexts = ""
             sample = {
                 "样本ID": idx + 1,
-                "user_input": orig.get("user_input", ""),
-                "response": orig.get("response", ""),
-                "reference": orig.get("reference", ""),
+                "user_input": user_input,
+                "retrieved_contexts": retrieved_contexts,
+                "response": response,
+                "reference": reference,
+                "reference_contexts": reference_contexts,
             }
             for metric in metrics:
                 sample[metric] = overall_scores.get(metric, "")

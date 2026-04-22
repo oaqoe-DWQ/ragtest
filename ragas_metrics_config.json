@@ -1,6 +1,13 @@
 {
   "enabled_metrics": [
-    "faithfulness"
+    "context_recall",
+    "context_precision",
+    "context_entity_recall",
+    "context_relevance",
+    "faithfulness",
+    "answer_relevancy",
+    "answer_correctness",
+    "answer_similarity"
   ],
   "version": "1.0"
 }

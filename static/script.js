@@ -689,7 +689,8 @@ async function showBM25Details() {
     showLoading('正在加载BM25评估明细...');
     
     try {
-        const response = await fetch('/api/bm25/details');
+        // === 改动：传递 dataset_file 参数，支持多数据集并发查看详情 ===
+        const response = await fetch(`/api/bm25/details?dataset_file=${encodeURIComponent(currentDatasetFile)}`);
         const result = await response.json();
         
         if (result.success) {
@@ -809,7 +810,8 @@ async function showRagasDetails() {
     showLoading('正在加载Ragas评估明细...');
     
     try {
-        const response = await fetch('/api/ragas/details');
+        // === 改动：传递 dataset_file 参数，支持多数据集并发查看详情 ===
+        const response = await fetch(`/api/ragas/details?dataset_file=${encodeURIComponent(currentDatasetFile)}`);
         const result = await response.json();
         
         if (result.success) {
@@ -1371,7 +1373,7 @@ async function saveEvaluation() {
                 })
             });
         } else {
-            // 使用原有的保存API
+            // 使用原有的保存API（传递 dataset_file 隔离保存）
             response = await fetch('/api/save-evaluation', {
                 method: 'POST',
                 headers: {
@@ -1379,7 +1381,9 @@ async function saveEvaluation() {
                 },
                 body: JSON.stringify({
                     evaluation_type: currentSaveType,
-                    description: description
+                    description: description,
+                    // === 改动：传递 dataset_file，支持按数据集隔离保存 ===
+                    dataset_file: currentDatasetFile
                 })
             });
         }

@@ -165,11 +165,12 @@ class MultiTurnRetrievalGenerator:
 
         if chat_history is None:
             chat_history = []
-
+        
+        #接口请求参数
         headers = {
             "Content-Type": "application/json"
         }
-
+        
         payload = {
             "query": query,
             "knowledge_id": self.knowledge_id,
@@ -492,7 +493,7 @@ def main():
         signal.signal(signal.SIGTERM, signal_handler)
 
     # 配置路径
-    input_path = os.path.join(script_dir, "原始数据", "多轮带改写.xlsx")
+    input_path = os.path.join(script_dir, "原始数据", "多轮带改写test.xlsx")
     output_dir = os.path.join(script_dir, "标准数据")
     os.makedirs(output_dir, exist_ok=True)
 
